@@ -1,0 +1,268 @@
+;globals [
+;  cycle_length;
+;  step_counter;
+;  length_of_flash;
+;  stop_flash;
+;  reset_step_counter;
+;]
+
+globals [
+  max_flashing_AUVs;
+]
+
+turtles-own [
+   cycle_length;
+  step_counter;
+  length_of_flash;
+  stop_flash;
+  reset_step_counter; 
+]
+
+to Controller-setup
+
+reset-perspective
+
+set cycle_length 10
+set step_counter random ( cycle_length )
+set length_of_flash 3
+set stop_flash length_of_flash
+set reset_step_counter stop_flash
+
+
+
+
+;set list-of-internal-values-confinement lput 0 list-of-internal-values-confinement ; after the creation of the distance-to-basestation sensor, the internal "previous tick" integer value of the sensor has to be set.   
+;set list-of-internal-values-firefly lput 0 list-of-internal-values-firefly ;; cycle_length
+;set list-of-internal-values-firefly lput 1 list-of-internal-values-firefly ;; step_counter
+;set list-of-internal-values-firefly lput 2 list-of-internal-values-firefly ;; length_of_flash
+;set list-of-internal-values-firefly lput 3 list-of-internal-values-firefly;; stop_flash
+;set list-of-internal-values-firefly lput 4 list-of-internal-values-firefly ;; reset_step_counter
+
+;set list-of-internal-values-firefly []
+
+
+;set list-of-internal-values-firefly lput 0 [ 10 ] ;; cycle_length
+;print "setup item 0 list"
+;print item 0 list-of-internal-values-firefly
+;
+;set list-of-internal-values-firefly lput 1 [ ( random 10 )] ;; step_counter
+;set list-of-internal-values-firefly lput 2 (list length_of_flash) ;; length_of_flash
+;set list-of-internal-values-firefly lput 3  (list stop_flash) ;; stop_flash
+;set list-of-internal-values-firefly lput 4  (list reset_step_counter) ;; reset_step_counter
+
+
+end
+
+
+to Controller-update ; empty controller with the following parts: 
+                     ; - performing the standard forward motion (both thrusters 75% forward)
+                     ; - trying to avoid near borders
+                     ; - trying to avoid AUV collisions
+                     ; - using a correlated random walk
+                     ; - keeping the AUV below a certain depth
+                     ; - keeping the AUVs above the ground
+ 
+  controller-standard-forward-motion ; 75% forward motion
+  wall-avoidance
+  
+;  print "item 0 list"
+;  print item 0 list-of-internal-values-firefly
+  ;print "cycle_length"
+  ;print cycle_length
+;  let cycle_length ( item 0 ( item 0 list-of-internal-values-firefly) )
+;  let step_counter ( item 1 list-of-internal-values-firefly )
+;  let length_of_flash ( item 2 list-of-internal-values-firefly )
+;  let stop_flash ( item 3 list-of-internal-values-firefly ) 
+;  let reset_step_counter ( item 4 list-of-internal-values-firefly )
+  
+  let flashes_to_reset 1
+  
+
+  inc_step_counter 
+  
+  if step_counter >= stop_flash
+   [ is_other_AUV_flashing flashes_to_reset  ]
+   
+   set_AUVs_color 
+   ;forward 1
+   ;plot_flashing_AUVs
+
+end
+
+to is_other_AUV_flashing [flashes_to_reset ]
+  ;let near_robots ( own-in-radius 1 )with [ color = green ]
+  ;let flashing_AUVs ( count  near_robots )
+  let flashing_AUVs_around  count (own-in-radius 10) with [color = green]
+  ;type "flashing AUVs_around: " show flashing_AUVs_around
+  ;type "flashes_to_reset: " show flashes_to_reset
+  
+  if flashing_AUVs_around >= flashes_to_reset
+    [ set step_counter reset_step_counter ]  
+end
+
+to set_AUVs_color 
+  ;show step_counter < stop_flash
+  ifelse ( step_counter < stop_flash )
+  [ set color green ]
+  [ set color yellow ]
+end
+
+to inc_step_counter
+  ;type "before step_counter " show step_counter
+  set step_counter (  ( step_counter + 1 ) mod cycle_length )
+  ;type "after step_counter " show step_counter
+end
+
+to plot_flashing_AUVs
+  let akt_flashing_AUVs count turtles with [ color = green ]
+  plot akt_flashing_AUVs
+  
+  if akt_flashing_AUVs > max_flashing_AUVs
+  [
+    set max_flashing_AUVs akt_flashing_AUVs
+  ]
+end
+
+
+
+to wall-avoidance
+  
+      ; all sensor information in integers                   
+  let passive-distance-front item 0 list-of-sensor-integer-values
+  let passive-distance-right item 1 list-of-sensor-integer-values
+  let passive-distance-back item 2 list-of-sensor-integer-values
+  let passive-distance-left item 3 list-of-sensor-integer-values
+  let passive-distance-up item 4 list-of-sensor-integer-values  
+  let passive-distance-down item 5 list-of-sensor-integer-values  
+  
+  let active-distance-front item 6 list-of-sensor-integer-values  
+  let active-distance-right item 7 list-of-sensor-integer-values  
+  let active-distance-back item 8 list-of-sensor-integer-values
+  let active-distance-left item 9 list-of-sensor-integer-values  
+  
+  let distance-to-ground item 10 list-of-sensor-integer-values
+  let depth-pressure item 11 list-of-sensor-integer-values ; IMPORTANT: As of now, "depth" is the distance to the water surface (=pressure), so a higher value really means a deeper AUV.
+  let number-of-near-robots item 12 list-of-sensor-integer-values
+  
+    ; border avoidance; leads to a counter-clockwise rotation of the AUVs after a while
+  ifelse (active-distance-front > 0) ; when there is an obstacle/wall inside the frontal active sensor range
+    [ 
+      controller-actuator-left-stop ; if the border is *very* close always turn soft. 
+    ]  
+    
+    [ ; when AUV observes nothing in front
+    ifelse ((active-distance-right > 0) and (active-distance-left > 0)) 
+       [ controller-actuator-left-stop] ; if there are close borders to both sides (e.g. corners), then make a hard left turn
+       [ ; if only one side sensor perceives an object
+       ifelse (active-distance-right > 0) ; if AUV observes object to right
+         [controller-actuator-left-decrease] ; soft turn left
+         [ ; if no object to the right
+         ifelse (active-distance-left > 0) ; if AUV observes object to left
+           [controller-actuator-right-decrease] ; soft turn right
+           [ ; if no objects were perceived
+           ; AUV collision avoidance
+           ifelse (passive-distance-front > 150) ; when there is a very near AUV in front
+             [controller-actuator-left-stop controller-actuator-right-stop controller-actuator-left-increase] ; stop thrusters when there is another AUV very close in front; increase left thruster to make a slow right turn
+             [ ; if there is not AUV near in front
+             ifelse (random-float 1.0 < 0.5) ; randomized soft turn; "correlated random walk"
+               [controller-actuator-left-increase] ; turn either right (50% chance)
+               [controller-actuator-right-increase] ; or left (50% chance)
+             ]
+           ]       
+         ]
+       ]     
+     ]   
+  ; after all avoidance behaviours
+  ; keep a certain depth
+  ;if (depth-pressure < 125)   [controller-buoyancy-sink] ;; (note that depth-pressure is the distance from the water surface) AUV is getting too high (or pressure too low) -> AUV should sink
+  ;if (distance-to-ground > 0) [controller-buoyancy-rise] ;; AUV is getting too close to the ground -> AUV should rise
+end
+
+
+to controller-standard-forward-motion
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 125) ; ~75% forward speed for left thruster
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 125) ; ~75% forward speed for right thruster
+  ;set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 0);
+  ;set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 0)
+end
+
+
+to controller-actuator-left-increase
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values (item 0 list-of-actuator-integer-values + 16)) ; increase forward speed for left thruster  
+end
+
+
+to controller-actuator-right-increase
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values (item 1 list-of-actuator-integer-values + 16)) ; increase forward speed for right thruster    
+end
+
+
+to controller-actuator-left-decrease
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values (item 0 list-of-actuator-integer-values - 16)) ; increase forward speed for left thruster  
+end
+
+
+to controller-actuator-right-decrease
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values (item 1 list-of-actuator-integer-values - 16)) ; increase forward speed for right thruster    
+end
+
+
+
+to controller-actuator-left-stop  
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 0) ; set forward speed for left thruster to 0    
+end
+
+
+to controller-actuator-right-stop
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 0) ; set forward speed for right thruster to 0
+end
+
+
+to controller-buoyancy-sink
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values -64) ; set buoyancy to sink at half speed
+end
+
+
+to controller-buoyancy-rise
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values 64) ; set buoyancy to rise at half speed
+end
+
+
+to controller-buoyancy-stay
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values 0) ; set buoyancy to remain at current depth
+end
+
+
+;  
+;  ifelse ( active-distance-front > 0 )
+;  [
+;    ifelse ( active-distance-right > 0 )
+;    [
+;      controller-actuator-left-stop 
+;    ]
+;    [
+;      ifelse ( active-distance-left > 0 )
+;      [
+;         controller-actuator-right-stop 
+;      ] 
+;      [
+;         ifelse ( active-distance-right > active-distance-left )
+;    [
+;      controller-actuator-left-stop 
+;    ] 
+;    [
+;      controller-actuator-right-stop 
+;    ]
+;      ]
+;    ]
+;   
+;  ]
+;  [
+;    ifelse random 2 = 0
+;    [
+;      controller-actuator-left-stop 
+;    ]
+;    [
+;       controller-actuator-right-stop 
+;    ]
+;  ]

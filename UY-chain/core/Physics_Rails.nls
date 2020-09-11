@@ -1,0 +1,225 @@
+globals [  
+  pre-movement-turn;
+  post-movement-turn;
+]
+
+;; ###########################################################################
+;; Variables and setup specific to the rails engine. 
+;; ###########################################################################
+to core-setup-rails 
+  set max-speed-per-step 0.3            ;; in AUV lengths; 1 step = 1 tick != 1 second; before flow resistance                  
+  set max-acceleration 0.125            ;; in AUV lengths per second squared
+  set AUV-drag-coefficient 0.45         ;; this is an estimate, for the dummy AUV. For Lily, ACd has been deteremined more exactly
+end
+
+;; ###########################################################################
+;; #                                                                         #
+;; #  Calculates the movement of the AUV in x- and y-direction               #
+;; #  Note that the time componenet of velocity is implicit here. If the length of time represented by a tick changes, then velocity will also. 
+;; #
+;; #  output: distance covered by the AUV                                    #
+;; #                                                                         #
+;; ###########################################################################
+to-report core-calculate-thrust-rails  ;; this procedure is executed by AUVs. 
+  
+  let desired-movement-old desired-movement  ;; this is an inertial vector. AUVs have intertia that is changed by the thruster action. 
+  
+  let left-thruster-output (item 0 list-of-actuator-volt-values)
+  let right-thruster-output (item 1 list-of-actuator-volt-values)
+ 
+  let left-thruster-forward 1
+  let right-thruster-forward 1
+  
+  if left-thruster-output < 0
+  [
+    set left-thruster-forward -1
+    set left-thruster-output ( abs left-thruster-output ) 
+  ]
+  
+  if right-thruster-output < 0
+  [
+    set right-thruster-forward -1
+    set right-thruster-output ( abs right-thruster-output ) 
+  ]
+ 
+  let left-thruster-way ( (left-thruster-output / 2.5 ) * max-speed-per-step)   ;; scale voltage range onto maximum speed of AUV. 
+  let right-thruster-way ( (right-thruster-output / 2.5 ) * max-speed-per-step)
+  
+  let thruster-distance 0.7   ;; physical distance between thrusters, used in determining turn radius when thrusters provide different thrusts. 
+  let turndir 0    ;; direction AUV is turning. 0, straight. -1, left. 1, right. 
+  
+  ifelse left-thruster-way < right-thruster-way
+    [ set turndir -1 ]   ; left
+    [ set turndir 1 ]  ; right
+    
+  ifelse (left-thruster-way >= 0) and (right-thruster-way >= 0)
+    [ ;; if the AUV is attempting to go forwards, or at least stay where it is. 
+      ifelse  ( left-thruster-way * left-thruster-forward ) = ( right-thruster-way * right-thruster-forward )
+      [  ;; exact forward thrust, no turning. 
+        set pre-movement-turn 0
+        set desired-movement ( left-thruster-way * left-thruster-forward )  ;; wish to move straight forward.
+        set post-movement-turn 0
+      ] 
+      [  ;; one thruster providing more thrust than the other, AUV trying to turn. 
+        let longway max list left-thruster-way right-thruster-way
+        let shortway min list left-thruster-way right-thruster-way     
+      
+        if ( (( (abs left-thruster-way ) > (abs right-thruster-way) ) AND ( left-thruster-forward < 0 ) )
+          OR ( (( abs right-thruster-way ) > ( abs left-thruster-way) ) AND (right-thruster-forward < 0 ) ) )
+        [
+          set turndir (turndir * (-1))
+        ]
+      
+        let turnradius (thruster-distance / (1 - (( shortway / longway) * left-thruster-forward * right-thruster-forward )))
+        let turnangle ((longway * 360) / (2 * turnradius * pi)) 
+        let phi ( longway / turnradius ) * 180 / pi
+        
+        set desired-movement ( 2 * turnradius * sin ( phi / 2 ))
+        if left-thruster-forward < 0 OR right-thruster-forward < 0
+        [
+          set desired-movement ( -1 * desired-movement ) 
+        ]
+        set pre-movement-turn ((turnangle / 2) * turndir)
+        set post-movement-turn pre-movement-turn
+      ]
+    ]
+    [
+      print "ERROR"
+    ]
+      
+    let flow-resistance 0  ;; a scalar representing the drag force on the AUV. 
+
+    ifelse ( ( abs desired-movement-old ) > ( abs desired-movement ) )
+    [ ;; AUV is trying to slow down. 
+      set flow-resistance (core-calculate-flow-resistance-rails ( abs desired-movement-old ) ) ;; use the existing velocity of AUV to calculate drag. 
+     ifelse ( desired-movement-old > 0 )
+     [  set desired-movement ( desired-movement-old - flow-resistance )  ]
+     [  set desired-movement ( desired-movement-old + flow-resistance )  ]
+     ; set desired-movement ( desired-movement-old - flow-resistance )            ;; slow down is on basis of drag only, not the new desired movement velocity. 
+    ]
+    [ ;; AUV is trying to speed up, or at least maintain speed. 
+      ifelse ( ( abs( desired-movement-old - desired-movement ) ) > max-acceleration ) ;; this applies only to accelertation to incease velocity, decreasing velocity is dealt with above. 
+      [  ;; condition deals with AUV trying to exceed maximum acceleration, in which case we top out at maximum acceleration. 
+         ;set flow-resistance (core-calculate-flow-resistance ( ( abs desired-movement-old ) + max-acceleration)) ;; top out maximum acceleration, instead of using (new) desired velocity. 
+         ifelse ( desired-movement > 0 )
+         [
+           set flow-resistance ( core-calculate-flow-resistance-rails ( desired-movement-old + max-acceleration ) )
+           set desired-movement (( desired-movement-old + max-acceleration ) - flow-resistance ) 
+         ]
+         [
+           if ( desired-movement < 0 )
+           [
+             set flow-resistance ( core-calculate-flow-resistance-rails ( desired-movement-old - max-acceleration ) )
+             set desired-movement ( desired-movement-old - max-acceleration ) + flow-resistance 
+           ]           
+         ]
+      ]
+      [  ;; desired acceleration is within limit. 
+        set flow-resistance (core-calculate-flow-resistance-rails ( abs desired-movement ) )
+        
+        if desired-movement > 0
+        [ set desired-movement ( desired-movement - flow-resistance ) ]
+        if desired-movement < 0
+        [ set desired-movement ( desired-movement + flow-resistance ) ]      
+      ]
+    ]
+    
+    report  desired-movement  
+end
+
+;; ###########################################################################
+;; #                                                                         #
+;; #  Calculates the movement in z-direction of the AUV                      #
+;; #  input: voltage of buoyancy-control                                     #
+;; #  output: z-movement                                                     #
+;; #                                                                         #
+;; ###########################################################################
+to-report core-calculate-buoyancy-rails [ buoyancy-voltage] 
+  let AUV-density ( ((-1) * (( 1.25 - 0.75 ) / 5 ) * (buoyancy-voltage + 2.5)) + 1.25 )
+  let max-speed 0.3 
+  
+  if (buoyancy-voltage + 2.5) != 0
+  [
+      let z-movement (( 1 - AUV-density ) * max-speed )
+      set z-movement ( z-movement - (core-calculate-flow-resistance-rails z-movement ))
+      
+      report z-movement
+  ]
+  
+  report 0
+end
+
+
+;; ###########################################################################
+;; #                                                                         #
+;; #  Calculates the movement of the AUV                                     #
+;; #
+;; #  Prevents AUVs from moving through tank walls (netlogo 3d does not currently implement non-toroidal worlds). If an AUV is to 
+;; #  try and move through a wall, its forward motion is stopped. It may still turn, however. This simulates being able to turn whilst
+;; #  touching the wall, just by pushing into it. 
+;; #                                                                         #
+;; ###########################################################################
+to core-calculate-physics-movement-rails  
+  set auv-movement-vector         (list 0 0 0)
+
+  let z-movement core-calculate-buoyancy-rails (item 2 list-of-actuator-volt-values)
+  let new-zcor zcor + z-movement
+  if (not ((new-zcor > max-pzcor) or (new-zcor < min-pzcor)))  ;; can't go above water or underground. AUV will remain at current zcoordinate otherwise.
+  [  
+    set auv-movement-vector replace-item 2 auv-movement-vector ((new-zcor - zcor) * patchlength) ;; record move, in meters. 
+    set zcor new-zcor     
+  ]  
+ 
+ 
+  let forward-movement core-calculate-thrust-rails   ;; looks like movement and turning are done in two parts. First part of the turn, then move forward, then second part of the turn. 
+  set heading ( heading + pre-movement-turn )
+
+  let new-x ((sin heading) * forward-movement) + xcor  ;; guard against moving outside the tank's walls. This checks where the x and y coorindates would be following movement.
+  let new-y ((cos heading) * forward-movement) + ycor
+  if (not (( new-x < min-pxcor ) or ( new-x > max-pxcor) or ( new-y < min-pycor ) or (new-y > max-pycor)))
+  [            ;; forward motion only allowed if it does not breach the tank walls. 
+    ;; move is performed, hence movement-vector is updated with the magnitude of the AUV's displacement, in meters
+    set auv-movement-vector replace-item 0 auv-movement-vector ((new-x - xcor) / patchlength) 
+    set auv-movement-vector replace-item 1 auv-movement-vector ((new-y - ycor) / patchlength)
+    forward forward-movement  
+  ]              
+  
+  set heading ( heading + post-movement-turn )
+  
+  ;; calculate the directional-unit-vector, based on a normalised core-movement-vector
+  let vector-length sqrt ( ((item 0 auv-movement-vector) ^ 2) + ((item 1 auv-movement-vector) ^ 2) + ((item 2 auv-movement-vector) ^ 2))
+  ifelse vector-length != 0   ;; safety, avoid divide-by-zero 
+  [    
+    set auv-movement-unit-vector ( list ((item 0 auv-movement-vector) / vector-length)     ;; X component
+                                        ((item 1 auv-movement-vector) / vector-length)     ;; Y component
+                                        ((item 2 auv-movement-vector) / vector-length) )   ;; Z component
+  ]
+  [ set auv-movement-unit-vector (list 0 0 0) ]   ;; if the AUV is not moving, then the unit vector becomes a zero vector! 
+end
+
+
+;; ###########################################################################
+;; #                                                                         #
+;; #  Calculates the flow-resistance of the AUV                              #
+;; #  Equation used is as follows:
+;; #  Fd = 0.5* p * v*v * Cd * A
+;; #   where Fd is the force of drag
+;; #   p is the density of the fluid
+;; #   v is the speed of the object relative to fluid
+;; #   Cd is the drag co-efficient (dependent on the 'roughness' of material)
+;; #   A is the reference area, the cross section perpendicular to the direction of motion. 
+;; #    (all acquired from wikipedia, search for Drag (physics)
+;; #
+;; #  input: velocity of the AUV                                             #
+;; #  output: flow-resistance                                                #
+;; #                                                                         #
+;; ###########################################################################
+to-report core-calculate-flow-resistance-rails [velocity]
+  
+  let flow-resistance 0    ; in Newtons 
+  set flow-resistance ( (1 / 2) * AUV-drag-coefficient * density-water * AUV-cross-section * velocity * velocity )
+  
+  
+  report flow-resistance
+  
+end

@@ -1,0 +1,692 @@
+;;====================================================
+;;====================================================
+;;
+;; This controller implements the BOIDS algorithm on a robot with 12 sensors. 
+;; 
+;; In boids, each boid follows the following three rules:
+;; 1) Collision avoidance, avoid collisions with nearby objects
+;; 2) Velocity matching, try to match velocity with nearby boids. 
+;; 3) Flock centering, try to stay close to nearby boids. 
+;;
+;; Orginal boids implementation found on this webpage: http://www.red3d.com/cwr/boids/
+;;
+;;====================================================
+;;====================================================
+
+globals [
+	;;------------------------------------------------------------------
+	;; These variables are directly related to algorithmic performance.
+	boids-swarm-center-weight           ;; how much weight is given to trying to turn into swarm center when calculating boid movement
+	boids-boid-avoidance-weight         ;; how much weight is given to trying to avoid other boids when calculating boid movement
+	boids-match-velocity-weight         ;; how much weight is given to tyring to match velocity with other boids when calculating boid movement
+
+	boids-collision-threshold           ;; in terms of sensor readings, the distance at which this AUV attempts to avoid others around it. 
+	boids-wall-threshold                ;; in terms of sensor readings, the distance at which an AUV attempts to avoid walls. 
+	boids-surface-threshold             ;; depth pressure get smaller the closer we get to the surface  
+
+	boids-forward-movement-bias         ;; to make the swarm move around, when calculating boid movement, this dictates a preference for moving forward.
+  boids-observe-backwards             ;; true or false, this dictates whether the backwards facing sensor is used in calculating vectors
+	boids-max-rotational-sensor-influence  ;; maximum scaling factor for the influence of sensors facing, expressed for those facing directly ahead.
+	boids-min-rotational-sensor-influence  ;; minimum scaling factor for the influence of sensors facing, this one calculated for directly behind. 
+	;;------------------------------------------------------------------  
+
+         ;; These variables are related to profiling, and have nothing to do with boids algorithmic operation.  
+         collect-data-flag
+         collision-count
+         lost-swarm-count
+] 
+
+turtles-own 
+[  
+
+   wall-avoidance-sideways ;; NOT YET IMPLEMENTED. 
+   wall-avoidance-up       ;; the vector dictated by water surface and tank-floor avoidance. When set to non-zero values this overrides any boids related vectors.  
+  
+   ;; these variables comprise a vector indicating the perceived center of the swarm, relative to the current AUV
+   swarm-center-sideways ;; positive numbers are right, negative are left
+   swarm-center-forward  ;; positive numbers are forward, negative are back
+   swarm-center-up       ;; positive numbers are up, negative are down. 
+   
+   ;; these variables comprise a vector of prefered movement to avoid hitting other AUVs. 
+   boid-avoidance-sideways
+   boid-avoidance-forward
+   boid-avoidance-up
+   
+   ;; these variables comprise a vector of preferred movement to match the velocity of other AUVs seen around it (through blue light sensors)
+   match-velocity-sideways
+   match-velocity-forward
+   match-velocity-up
+   
+   ;; part of the match velocity rule. these variables are used to store the previous sensor readings. 
+   ;; They are used to calculate differences in sensor outputs, hence whether objects are approaching or departing.
+   prev-boid-distance-f
+   prev-boid-distance-fru
+   prev-boid-distance-frd
+   prev-boid-distance-fld
+   prev-boid-distance-flu
+   prev-boid-distance-bu
+   prev-boid-distance-bru
+   prev-boid-distance-brd
+   prev-boid-distance-bd
+   prev-boid-distance-bld
+   prev-boid-distance-blu
+   prev-boid-distance-b
+   
+   ;; part of the match-velocity rule. These linked lists store the last 10 difference readings on each sensor. They are used to mitigate sensor noise. 
+   match-velocity-differences-f
+   match-velocity-differences-fru
+   match-velocity-differences-frd
+   match-velocity-differences-fld
+   match-velocity-differences-flu
+   match-velocity-differences-bu
+   match-velocity-differences-bru
+   match-velocity-differences-brd
+   match-velocity-differences-bd
+   match-velocity-differences-bld
+   match-velocity-differences-blu
+   match-velocity-differences-b
+
+
+   state                  ;; can be "normal" or "avoid-wall".
+   avoid-wall-direction   ;; can be "left" or "right"
+   swarm-in-range         ;; used to indicate when the swarm is sensed within range. AUVs may remain stationary under two conditions, 
+                          ;; the swarm-related forces acting upon it dictate that it should remain so, or it cannot perceive any of the swarm, 
+                          ;; and so remains still. In the latter case, this variable is set to ensure the AUV moves. 
+ 
+   swarm-in-range-data-collection        ;; purely for data collection. Do not want to count every tick where a swarm member is lost, rather just the occurences where this happens. 
+]
+
+
+
+;;========================================================
+;; Called by the OS to step the controller. 
+;;========================================================
+to Controller-update
+  
+    ;; retrieve all sensor information in integers. Ordinarily high values from the sensors indicate something that is very close. 
+    ;; 255 is the largest value that can be returned, and subtracting sensor values from 255 translates large numbers into large
+    ;; distances. This is more useful for calculating which direction the swarm lies in, since otherwise large distances between
+    ;; elements in the swarm translate into small vectors of desired direction.    
+  let dist-f   255 - item 0 list-of-sensor-integer-values
+  let dist-fru 255 - item 1 list-of-sensor-integer-values
+  let dist-frd 255 - item 2 list-of-sensor-integer-values
+  let dist-fld 255 - item 3 list-of-sensor-integer-values
+  let dist-flu 255 - item 4 list-of-sensor-integer-values  
+  let dist-bu  255 - item 5 list-of-sensor-integer-values 
+  let dist-bru 255 - item 6 list-of-sensor-integer-values 
+  let dist-brd 255 - item 7 list-of-sensor-integer-values 
+  let dist-bd  255 - item 8 list-of-sensor-integer-values 
+  let dist-bld 255 - item 9 list-of-sensor-integer-values 
+  let dist-blu 255 - item 10 list-of-sensor-integer-values 
+  let dist-b   255 - item 11 list-of-sensor-integer-values 
+
+    ;; retrieve distances from tank parimeter through active distance sensors. 
+  let active-distance-front item 12 list-of-sensor-integer-values  
+  let active-distance-right item 13 list-of-sensor-integer-values  
+  let active-distance-left  item 15 list-of-sensor-integer-values 
+  let distance-to-ground    item 16 list-of-sensor-integer-values
+  let depth-pressure        item 17 list-of-sensor-integer-values ;; "depth" is the distance to the water surface (=pressure), so a higher value really means a deeper AUV.
+
+
+  ;;------------------------------------------
+  ;; this is a very effective and simple collision avoidance algorithm.
+  if state = "normal" and active-distance-front > boids-wall-threshold  ;; if a wall is detected. avoiding the wall is top priority.
+  [ 
+    set state "avoid-wall"  ;; a single sharp turn is to be made to avoid the wall. 
+    ifelse active-distance-right > active-distance-left ;; this represents a decision to turn either clockwise or counter clockwise, away from the wall. 
+        [  set avoid-wall-direction "left"  ]
+        [  set avoid-wall-direction "right" ]
+  ]
+  if state = "avoid-wall"
+  [
+    ifelse active-distance-front > boids-wall-threshold  ;; continue turning away from wall until the wall is no longer in front of the AUV. 
+    [  
+      ifelse avoid-wall-direction = "left"
+        [  controller-boids-left  ]
+        [  controller-boids-right ]
+    ]    
+    [  ;; no longer within threshold distance of wall, resume normal algorithmic operation. 
+      set state "normal"
+      controller-boids-forward 
+    ]
+  ]
+    ;; collision avoidance with the ground
+  set wall-avoidance-up 0  ;; no avoidance necessary, the default case. 
+  if distance-to-ground > boids-wall-threshold
+  [  set wall-avoidance-up (distance-to-ground - boids-wall-threshold)  ]  ;; set the AUV to rise, overriding any BIOD related algorithm
+    ;; collision avoidance with the surface
+  if depth-pressure < boids-surface-threshold
+  [  set wall-avoidance-up 0 - (boids-surface-threshold - depth-pressure)  ]  
+  ;;------------------------------------------  
+  
+  if state = "normal"
+  [    
+     ;; the three rules of boids give relative vector in which the current AUV should try to move. 
+     ;; passing distance variables in as parameters allows procedures to make local changes without disturbing their actual state. 
+    calculate-swarm-center dist-f dist-fru dist-frd dist-fld dist-flu dist-bu dist-bru dist-brd dist-bd dist-bld dist-blu dist-b ;; calculate center of swarm
+    calculate-boid-avoidance dist-f dist-fru dist-frd dist-fld dist-flu dist-bu dist-bru dist-brd dist-bd dist-bld dist-blu dist-b boids-collision-threshold ;; calculate small distance from other AUVs
+    calculate-match-velocities dist-f dist-fru dist-frd dist-fld dist-flu dist-bu dist-bru dist-brd dist-bd dist-bld dist-blu dist-b  ;; match velocities. 
+
+    ;; take averages
+    let collective-forward (( boids-forward-movement-bias + (boids-swarm-center-weight   * swarm-center-forward) 
+                                                          + (boids-boid-avoidance-weight * boid-avoidance-forward) 
+                                                          + (boids-match-velocity-weight * match-velocity-forward)) 
+                                                          / (boids-swarm-center-weight + boids-boid-avoidance-weight + boids-match-velocity-weight)) 
+    let collective-sideways ((   (boids-swarm-center-weight   * swarm-center-sideways) 
+                               + (boids-boid-avoidance-weight * boid-avoidance-sideways) 
+                               + (boids-match-velocity-weight * match-velocity-sideways)) 
+                               / (boids-swarm-center-weight + boids-boid-avoidance-weight + boids-match-velocity-weight))
+
+    
+    let collective-up wall-avoidance-up  ;; the default action is to allow wall collision avoidance to override other behaviours.
+    if wall-avoidance-up = 0
+    [  
+       set collective-up ((   (boids-swarm-center-weight   * swarm-center-up) 
+                            + (boids-boid-avoidance-weight * boid-avoidance-up) 
+                            + (boids-match-velocity-weight * match-velocity-up) ) 
+                            / (boids-swarm-center-weight + boids-boid-avoidance-weight + boids-match-velocity-weight))  
+    ]
+
+    if swarm-in-range = false  [  set collective-forward 150  ]
+
+      ;; based on the forward and sideways vectors, calculate the desired heading and speed. Note that up-down vector components are not included here. 
+      ;; The two thrusters are unable to dicate any up or down movement, and as such those components of the desired velocity are dealt with separately. 
+    let desired-heading calculate-desired-heading collective-forward collective-sideways
+    let desired-speed calculate-desired-speed collective-forward collective-sideways
+     
+      ;; calculate the thrusts of each thruster. Note that the vectors cannot exceed the maximum possible value of 255
+    let right-speed min list 255 right-thruster-speed desired-heading desired-speed
+    let left-speed min list 255 left-thruster-speed desired-heading desired-speed    
+        
+      ;; ensuring that values passed to buoyancy actuators do not exceed the possible range of values.  
+    if collective-up < -127   [  set collective-up -127  ]
+    if collective-up > 127    [  set collective-up 127   ]
+    
+ 
+      ;; set thruster and buoyancy speeds and values
+    set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values left-speed)  ; speed for left thruster
+    set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values right-speed) ; speed for right thruster
+    set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values collective-up)           ; set buoyancy differential. A value of 0 has AUVs stay at current depth
+
+  ]
+  
+  
+  ;;------------------------------------------
+  ;; This is some profiling code to count collisions and lost-swarm members
+  if collect-data-flag 
+  [ 
+    if (count other AUVs-DUMMY-here) > 0
+    [
+      set collision-count collision-count + 1  ;; increment collision count
+    ]
+    
+    ifelse dist-f + dist-fru + dist-frd + dist-fld + dist-flu + dist-bu + dist-bru + dist-brd + dist-bd + dist-bld + dist-blu = (11 * 255)  ;; note that we do not look directly behind 
+    [ 
+      if swarm-in-range-data-collection = true
+      [ 
+        set lost-swarm-count lost-swarm-count + 1 ;; increment the count of occurences where an AUV lost contact with the swarm.         
+      ]     ;; this is purely for data collection on how often a swarm member gets lost. 
+      set swarm-in-range-data-collection false 
+    ]
+    [  
+      set swarm-in-range-data-collection true 
+    ]
+  ]
+  ;;------------------------------------------
+  
+end
+
+
+;;====================================================
+;; If all sensors are given equal weight in deciding the directions that the AUV should move in, then AUVs tend to swim around on another a lot, but not
+;; to move across the tank as a swarm. This procedure, and the variables contained within it, allow the front-pointing sensors to have more influence than the back sensors. 
+;;====================================================
+to-report scale-sensor-influence-heading [ sensor-heading ]
+  let range boids-max-rotational-sensor-influence - boids-min-rotational-sensor-influence 
+
+    ;; sensor heading will be between -180 and 180. Taking the asbsolute deals with both cases. 
+  report (((180 - abs sensor-heading) / 180) * range) + boids-min-rotational-sensor-influence
+end
+
+
+to-report project-forward [ sensor-heading sensor-pitch sensor-reading ]
+  report (cos sensor-pitch) * (cos sensor-heading) * sensor-reading * scale-sensor-influence-heading sensor-heading
+end
+
+to-report project-sideways [ sensor-heading sensor-pitch sensor-reading ]
+  report (cos sensor-pitch) * (sin sensor-heading) * sensor-reading * scale-sensor-influence-heading sensor-heading
+end
+
+to-report project-up [ sensor-heading sensor-pitch sensor-reading ]
+  report (sin sensor-pitch) * sensor-reading 
+end
+
+;;====================================================
+;; Calculates the center of the swarm, based on the intensities of blue light readings around the AUV.
+;;
+;; The largest magnitude of vector that this procedure is able to procude is 
+;;====================================================
+to calculate-swarm-center [ dist-f dist-fru dist-frd dist-fld dist-flu dist-bu dist-bru dist-brd dist-bd dist-bld dist-blu dist-b ]
+  let noise-threshold 230  ;; thresholding ot avoid undesirable influence of sensor noise. 
+  
+  ;; distance indicators indicate maximum when there is nothing perceived. Thresholding places the center of the swarm on this AUV where that is the case. 
+  if dist-f > noise-threshold     [  set dist-f   0  ]
+  if dist-fru > noise-threshold   [  set dist-fru 0  ]
+  if dist-frd > noise-threshold   [  set dist-frd 0  ]
+  if dist-fld > noise-threshold   [  set dist-fld 0  ]
+  if dist-flu > noise-threshold   [  set dist-flu 0  ]
+  if dist-bu > noise-threshold    [  set dist-bu  0  ]
+  if dist-bru > noise-threshold   [  set dist-bru 0  ]
+  if dist-brd > noise-threshold   [  set dist-brd 0  ]
+  if dist-bd > noise-threshold    [  set dist-bd  0  ]
+  if dist-bld > noise-threshold   [  set dist-bld 0  ]
+  if dist-blu > noise-threshold   [  set dist-blu 0  ]
+  if dist-b > noise-threshold     [  set dist-b   0  ]
+      
+      ;; the project-X functions are passed the heading (item 3) and pitch (item 4) as held in the description of sensors. Changes to the orientation of sensors
+      ;; on the robot model should hence be automatically adjusted for here. 
+  set swarm-center-forward (
+                           project-forward (item 3 (item 0  list-of-sensor-descriptions)) (item 4 (item  0 list-of-sensor-descriptions)) dist-f  
+                         + project-forward (item 3 (item 1  list-of-sensor-descriptions)) (item 4 (item  1 list-of-sensor-descriptions)) dist-fru
+                         + project-forward (item 3 (item 2  list-of-sensor-descriptions)) (item 4 (item  2 list-of-sensor-descriptions)) dist-frd
+                         + project-forward (item 3 (item 3  list-of-sensor-descriptions)) (item 4 (item  3 list-of-sensor-descriptions)) dist-fld
+                         + project-forward (item 3 (item 4  list-of-sensor-descriptions)) (item 4 (item  4 list-of-sensor-descriptions)) dist-flu
+                         + project-forward (item 3 (item 5  list-of-sensor-descriptions)) (item 4 (item  5 list-of-sensor-descriptions)) dist-bu
+                         + project-forward (item 3 (item 6  list-of-sensor-descriptions)) (item 4 (item  6 list-of-sensor-descriptions)) dist-bru
+                         + project-forward (item 3 (item 7  list-of-sensor-descriptions)) (item 4 (item  7 list-of-sensor-descriptions)) dist-brd
+                         + project-forward (item 3 (item 8  list-of-sensor-descriptions)) (item 4 (item  8 list-of-sensor-descriptions)) dist-bd
+                         + project-forward (item 3 (item 9  list-of-sensor-descriptions)) (item 4 (item  9 list-of-sensor-descriptions)) dist-bld
+                         + project-forward (item 3 (item 10 list-of-sensor-descriptions)) (item 4 (item 10 list-of-sensor-descriptions)) dist-blu                         
+                         )
+
+                         
+  set swarm-center-sideways (
+                           project-sideways (item 3 (item 0  list-of-sensor-descriptions)) (item 4 (item 0 list-of-sensor-descriptions)) dist-f  
+                         + project-sideways (item 3 (item 1  list-of-sensor-descriptions)) (item 4 (item 1 list-of-sensor-descriptions)) dist-fru
+                         + project-sideways (item 3 (item 2  list-of-sensor-descriptions)) (item 4 (item 2 list-of-sensor-descriptions)) dist-frd
+                         + project-sideways (item 3 (item 3  list-of-sensor-descriptions)) (item 4 (item 3 list-of-sensor-descriptions)) dist-fld
+                         + project-sideways (item 3 (item 4  list-of-sensor-descriptions)) (item 4 (item 4 list-of-sensor-descriptions)) dist-flu
+                         + project-sideways (item 3 (item 5  list-of-sensor-descriptions)) (item 4 (item 5 list-of-sensor-descriptions)) dist-bu
+                         + project-sideways (item 3 (item 6  list-of-sensor-descriptions)) (item 4 (item 6 list-of-sensor-descriptions)) dist-bru
+                         + project-sideways (item 3 (item 7  list-of-sensor-descriptions)) (item 4 (item 7 list-of-sensor-descriptions)) dist-brd
+                         + project-sideways (item 3 (item 8  list-of-sensor-descriptions)) (item 4 (item 8 list-of-sensor-descriptions)) dist-bd
+                         + project-sideways (item 3 (item 9  list-of-sensor-descriptions)) (item 4 (item 9 list-of-sensor-descriptions)) dist-bld
+                         + project-sideways (item 3 (item 10 list-of-sensor-descriptions)) (item 4 (item 10 list-of-sensor-descriptions)) dist-blu
+                         )
+
+  set swarm-center-up (
+                           project-up (item 3 (item 0  list-of-sensor-descriptions)) (item 4 (item 0 list-of-sensor-descriptions)) dist-f  
+                         + project-up (item 3 (item 1  list-of-sensor-descriptions)) (item 4 (item 1 list-of-sensor-descriptions)) dist-fru
+                         + project-up (item 3 (item 2  list-of-sensor-descriptions)) (item 4 (item 2 list-of-sensor-descriptions)) dist-frd
+                         + project-up (item 3 (item 3  list-of-sensor-descriptions)) (item 4 (item 3 list-of-sensor-descriptions)) dist-fld
+                         + project-up (item 3 (item 4  list-of-sensor-descriptions)) (item 4 (item 4 list-of-sensor-descriptions)) dist-flu
+                         + project-up (item 3 (item 5  list-of-sensor-descriptions)) (item 4 (item 5 list-of-sensor-descriptions)) dist-bu
+                         + project-up (item 3 (item 6  list-of-sensor-descriptions)) (item 4 (item 6 list-of-sensor-descriptions)) dist-bru
+                         + project-up (item 3 (item 7  list-of-sensor-descriptions)) (item 4 (item 7 list-of-sensor-descriptions)) dist-brd
+                         + project-up (item 3 (item 8  list-of-sensor-descriptions)) (item 4 (item 8 list-of-sensor-descriptions)) dist-bd
+                         + project-up (item 3 (item 9  list-of-sensor-descriptions)) (item 4 (item 9 list-of-sensor-descriptions)) dist-bld
+                         + project-up (item 3 (item 10 list-of-sensor-descriptions)) (item 4 (item 10 list-of-sensor-descriptions)) dist-blu 
+                         ;
+                         )
+  if boids-observe-backwards
+  [
+    set swarm-center-forward swarm-center-forward 
+                         + project-forward (item 3 (item 11 list-of-sensor-descriptions)) (item 4 (item 11 list-of-sensor-descriptions)) dist-b
+    set swarm-center-sideways swarm-center-sideways
+                         + project-forward (item 3 (item 11 list-of-sensor-descriptions)) (item 4 (item 11 list-of-sensor-descriptions)) dist-b  
+    set swarm-center-up swarm-center-up
+                         + project-forward (item 3 (item 11 list-of-sensor-descriptions)) (item 4 (item 11 list-of-sensor-descriptions)) dist-b
+  ]
+        
+  ;; used to calculate whether any other swarm member is perceived. If it is not, then symmetry must be broken by forcing this AUV forward. 
+  ifelse dist-f + dist-fru + dist-frd + dist-fld + dist-flu + dist-bu + dist-bru + dist-brd + dist-bd + dist-bld + dist-blu = 0 + dist-b
+  [ 
+    set swarm-in-range false      
+  ]
+  [  
+    set swarm-in-range true  
+  ]
+end
+
+
+to sensor-specific-boid-avoidance [ sensor-value sensor-number threshold ]
+  
+  if sensor-value < threshold
+  [ 
+      ;; if less than threshold value, then add projections to each vector component. Sensor heading and pitch retrieved from description of sensors to accomodate potential changes
+    set boid-avoidance-forward  boid-avoidance-forward  - ( project-forward  (item 3 (item sensor-number list-of-sensor-descriptions)) ;; the sensor heading
+                                                                           (item 4 (item sensor-number list-of-sensor-descriptions)) ;; the sensor pitch
+                                                                           (threshold - sensor-value)                                ;; interested in the difference between threshold and actual value
+                                                          )
+    set boid-avoidance-sideways boid-avoidance-sideways - ( project-sideways (item 3 (item sensor-number list-of-sensor-descriptions)) 
+                                                                           (item 4 (item sensor-number list-of-sensor-descriptions)) 
+                                                                           (threshold - sensor-value)
+                                                          )
+    set boid-avoidance-up       boid-avoidance-up       - ( project-up       (item 3 (item sensor-number list-of-sensor-descriptions)) 
+                                                                           (item 4 (item sensor-number list-of-sensor-descriptions)) 
+                                                                           (threshold - sensor-value)
+                                                          )
+  ]  
+end
+
+;;====================================================
+;; Calculates which direction the AUV should move in to best avoid hitting other AUVs around it, based on the supplied threshold
+;;====================================================
+to calculate-boid-avoidance [ dist-f dist-fru dist-frd dist-fld dist-flu dist-bu dist-bru dist-brd dist-bd dist-bld dist-blu dist-b threshold ]
+ 
+  ;show passive-distance-front
+  set boid-avoidance-sideways 0
+  set boid-avoidance-forward 0
+  set boid-avoidance-up 0
+  
+  ;; statements that check if AUV distance is closer than threshold. (remember, close = high numbers from sensors)
+  ;; If this is the case, then the distance (where 0 is just inside threshold, large = very close!) is calculated,
+  ;; and turned into part of a vector dictating which way the AUV should try to move. 
+  sensor-specific-boid-avoidance dist-f   0  threshold 
+  sensor-specific-boid-avoidance dist-fru 1  threshold 
+  sensor-specific-boid-avoidance dist-frd 2  threshold 
+  sensor-specific-boid-avoidance dist-fld 3  threshold 
+  sensor-specific-boid-avoidance dist-flu 4  threshold 
+  sensor-specific-boid-avoidance dist-bu  5  threshold 
+  sensor-specific-boid-avoidance dist-bru 6  threshold  
+  sensor-specific-boid-avoidance dist-blu 7  threshold   
+  sensor-specific-boid-avoidance dist-bd  8  threshold 
+  sensor-specific-boid-avoidance dist-bld 9  threshold     
+  sensor-specific-boid-avoidance dist-blu 10 threshold 
+  if boids-observe-backwards
+  [
+    sensor-specific-boid-avoidance dist-b   11 threshold 
+  ]
+  
+end
+
+
+;;====================================================
+;; calculates the components of vector to best match velocity with things perceived by sensors. It operates on whether the sensors detect something approaching
+;; or departing, and attempts to maintain the distance observed by the sensors. Where several sensors observe objects, the individual vectors are summed. 
+;;
+;; The procedure requires that the last set of readings be recorded, and these are used to calculate the differential with the current readings. To avoid
+;; problems arising from sensor noise, a number of differentials are used when calculating vectors. These are stored in a linked list, with new readings 
+;; added to the front and old readings dropped off the back of the list. Since the differences cover a number of readings, their sum is used in calculating 
+;; vectors, rather than their averages. 
+;;====================================================
+to calculate-match-velocities [ dist-f dist-fru dist-frd dist-fld dist-flu dist-bu dist-bru dist-brd dist-bd dist-bld dist-blu dist-b  ]
+  
+    ;; if current reading is 10, previous was 50, then we are approaching something, and should slow down - ie, a negative vector. 
+  let diff-f   (dist-f   - prev-boid-distance-f)
+  let diff-fru (dist-fru - prev-boid-distance-fru)
+  let diff-frd (dist-frd - prev-boid-distance-frd)
+  let diff-fld (dist-fld - prev-boid-distance-fld)
+  let diff-flu (dist-flu - prev-boid-distance-flu)
+  let diff-bu  (dist-bu  - prev-boid-distance-bu)
+  let diff-bru (dist-bru - prev-boid-distance-bru)
+  let diff-brd (dist-brd - prev-boid-distance-brd)
+  let diff-bd  (dist-bd  - prev-boid-distance-bd)
+  let diff-bld (dist-bld - prev-boid-distance-bld)
+  let diff-blu (dist-blu - prev-boid-distance-blu)
+  let diff-b   (dist-b   - prev-boid-distance-b)
+  
+  ;; add diff-fronts to front of lists
+  set match-velocity-differences-f   fput diff-f    match-velocity-differences-f
+  set match-velocity-differences-fru fput diff-fru  match-velocity-differences-fru
+  set match-velocity-differences-frd fput diff-frd  match-velocity-differences-frd
+  set match-velocity-differences-fld fput diff-fld  match-velocity-differences-fld
+  set match-velocity-differences-flu fput diff-flu  match-velocity-differences-flu
+  set match-velocity-differences-bu  fput diff-bu   match-velocity-differences-bu
+  set match-velocity-differences-bru fput diff-bru  match-velocity-differences-bru
+  set match-velocity-differences-brd fput diff-brd  match-velocity-differences-brd
+  set match-velocity-differences-bd  fput diff-bd   match-velocity-differences-bd
+  set match-velocity-differences-bld fput diff-bld  match-velocity-differences-bld
+  set match-velocity-differences-blu fput diff-blu  match-velocity-differences-blu
+  set match-velocity-differences-b   fput diff-b    match-velocity-differences-b
+
+    ;; drop the last element from the end of the list
+  set match-velocity-differences-f   but-last  match-velocity-differences-f
+  set match-velocity-differences-fru but-last  match-velocity-differences-fru
+  set match-velocity-differences-frd but-last  match-velocity-differences-frd
+  set match-velocity-differences-fld but-last  match-velocity-differences-fld
+  set match-velocity-differences-flu but-last  match-velocity-differences-flu
+  set match-velocity-differences-bu  but-last  match-velocity-differences-bu
+  set match-velocity-differences-bru but-last  match-velocity-differences-bru
+  set match-velocity-differences-brd but-last  match-velocity-differences-brd
+  set match-velocity-differences-bd  but-last  match-velocity-differences-bd
+  set match-velocity-differences-bld but-last  match-velocity-differences-bld
+  set match-velocity-differences-blu but-last  match-velocity-differences-blu
+  set match-velocity-differences-b   but-last  match-velocity-differences-b   
+
+    ;; the vector is taken as the sum of 10 difference measures
+  set match-velocity-forward  ( 
+                             project-forward (item 3 (item 0  list-of-sensor-descriptions)) (item 4 (item 0  list-of-sensor-descriptions)) (sum match-velocity-differences-f) 
+                           + project-forward (item 3 (item 1  list-of-sensor-descriptions)) (item 4 (item 1  list-of-sensor-descriptions)) (sum match-velocity-differences-fru)
+                           + project-forward (item 3 (item 2  list-of-sensor-descriptions)) (item 4 (item 2  list-of-sensor-descriptions)) (sum match-velocity-differences-frd)
+                           + project-forward (item 3 (item 3  list-of-sensor-descriptions)) (item 4 (item 3  list-of-sensor-descriptions)) (sum match-velocity-differences-fld)
+                           + project-forward (item 3 (item 4  list-of-sensor-descriptions)) (item 4 (item 4  list-of-sensor-descriptions)) (sum match-velocity-differences-flu)
+                           + project-forward (item 3 (item 5  list-of-sensor-descriptions)) (item 4 (item 5  list-of-sensor-descriptions)) (sum match-velocity-differences-bu)
+                           + project-forward (item 3 (item 6  list-of-sensor-descriptions)) (item 4 (item 6  list-of-sensor-descriptions)) (sum match-velocity-differences-bru)
+                           + project-forward (item 3 (item 7  list-of-sensor-descriptions)) (item 4 (item 7  list-of-sensor-descriptions)) (sum match-velocity-differences-brd)
+                           + project-forward (item 3 (item 8  list-of-sensor-descriptions)) (item 4 (item 8  list-of-sensor-descriptions)) (sum match-velocity-differences-bd)
+                           + project-forward (item 3 (item 9  list-of-sensor-descriptions)) (item 4 (item 9  list-of-sensor-descriptions)) (sum match-velocity-differences-bld)
+                           + project-forward (item 3 (item 10 list-of-sensor-descriptions)) (item 4 (item 10 list-of-sensor-descriptions)) (sum match-velocity-differences-blu)
+                           )
+                                                                                        
+  set match-velocity-sideways  (
+                             project-sideways (item 3 (item 0  list-of-sensor-descriptions)) (item 4 (item 0  list-of-sensor-descriptions)) (sum match-velocity-differences-f) 
+                           + project-sideways (item 3 (item 1  list-of-sensor-descriptions)) (item 4 (item 1  list-of-sensor-descriptions)) (sum match-velocity-differences-fru)
+                           + project-sideways (item 3 (item 2  list-of-sensor-descriptions)) (item 4 (item 2  list-of-sensor-descriptions)) (sum match-velocity-differences-frd)
+                           + project-sideways (item 3 (item 3  list-of-sensor-descriptions)) (item 4 (item 3  list-of-sensor-descriptions)) (sum match-velocity-differences-fld)
+                           + project-sideways (item 3 (item 4  list-of-sensor-descriptions)) (item 4 (item 4  list-of-sensor-descriptions)) (sum match-velocity-differences-flu)
+                           + project-sideways (item 3 (item 5  list-of-sensor-descriptions)) (item 4 (item 5  list-of-sensor-descriptions)) (sum match-velocity-differences-bu)
+                           + project-sideways (item 3 (item 6  list-of-sensor-descriptions)) (item 4 (item 6  list-of-sensor-descriptions)) (sum match-velocity-differences-bru)
+                           + project-sideways (item 3 (item 7  list-of-sensor-descriptions)) (item 4 (item 7  list-of-sensor-descriptions)) (sum match-velocity-differences-brd)
+                           + project-sideways (item 3 (item 8  list-of-sensor-descriptions)) (item 4 (item 8  list-of-sensor-descriptions)) (sum match-velocity-differences-bd)
+                           + project-sideways (item 3 (item 9  list-of-sensor-descriptions)) (item 4 (item 9  list-of-sensor-descriptions)) (sum match-velocity-differences-bld)
+                           + project-sideways (item 3 (item 10 list-of-sensor-descriptions)) (item 4 (item 10 list-of-sensor-descriptions)) (sum match-velocity-differences-blu)
+                           )                                            
+         
+  set match-velocity-up  ( 
+                             project-up (item 3 (item 0  list-of-sensor-descriptions)) (item 4 (item 0  list-of-sensor-descriptions)) (sum match-velocity-differences-f) 
+                           + project-up (item 3 (item 1  list-of-sensor-descriptions)) (item 4 (item 1  list-of-sensor-descriptions)) (sum match-velocity-differences-fru)
+                           + project-up (item 3 (item 2  list-of-sensor-descriptions)) (item 4 (item 2  list-of-sensor-descriptions)) (sum match-velocity-differences-frd)
+                           + project-up (item 3 (item 3  list-of-sensor-descriptions)) (item 4 (item 3  list-of-sensor-descriptions)) (sum match-velocity-differences-fld)
+                           + project-up (item 3 (item 4  list-of-sensor-descriptions)) (item 4 (item 4  list-of-sensor-descriptions)) (sum match-velocity-differences-flu)
+                           + project-up (item 3 (item 5  list-of-sensor-descriptions)) (item 4 (item 5  list-of-sensor-descriptions)) (sum match-velocity-differences-bu)
+                           + project-up (item 3 (item 6  list-of-sensor-descriptions)) (item 4 (item 6  list-of-sensor-descriptions)) (sum match-velocity-differences-bru)
+                           + project-up (item 3 (item 7  list-of-sensor-descriptions)) (item 4 (item 7  list-of-sensor-descriptions)) (sum match-velocity-differences-brd)
+                           + project-up (item 3 (item 8  list-of-sensor-descriptions)) (item 4 (item 8  list-of-sensor-descriptions)) (sum match-velocity-differences-bd)
+                           + project-up (item 3 (item 9  list-of-sensor-descriptions)) (item 4 (item 9  list-of-sensor-descriptions)) (sum match-velocity-differences-bld)
+                           + project-up (item 3 (item 10 list-of-sensor-descriptions)) (item 4 (item 10 list-of-sensor-descriptions)) (sum match-velocity-differences-blu)  
+                          )           
+  
+  if boids-observe-backwards
+  [
+    set match-velocity-forward match-velocity-forward 
+                + project-forward  (item 3 (item 11 list-of-sensor-descriptions)) (item 4 (item 11 list-of-sensor-descriptions)) (sum match-velocity-differences-b) 
+    set match-velocity-sideways match-velocity-sideways
+                + project-sideways (item 3 (item 11 list-of-sensor-descriptions)) (item 4 (item 11 list-of-sensor-descriptions)) (sum match-velocity-differences-b)             
+    set match-velocity-up match-velocity-up 
+                + project-up       (item 3 (item 11 list-of-sensor-descriptions)) (item 4 (item 11 list-of-sensor-descriptions)) (sum match-velocity-differences-b)
+  ]          
+    
+
+    ;; record current readings for use in calcuating differentials for next reading
+  set prev-boid-distance-f    dist-f
+  set prev-boid-distance-fru  dist-fru
+  set prev-boid-distance-frd  dist-frd
+  set prev-boid-distance-fld  dist-fld
+  set prev-boid-distance-flu  dist-flu
+  set prev-boid-distance-bu   dist-bu
+  set prev-boid-distance-bru  dist-bru
+  set prev-boid-distance-brd  dist-brd
+  set prev-boid-distance-bd   dist-bd
+  set prev-boid-distance-bld  dist-bld
+  set prev-boid-distance-blu  dist-blu
+  set prev-boid-distance-b    dist-bd
+
+end
+
+
+
+
+
+;;====================================================
+;; basic trigonometry, will calculate the magnitude of the desired velocity (the speed)
+;;====================================================
+to-report calculate-desired-speed [ collective-forward collective-sideways ]
+  report sqrt ((collective-forward ^ 2) + (collective-sideways ^ 2))
+end
+
+;;====================================================
+;; basic trigonometry, will calclate the heading of the desired velocity. 
+;;====================================================
+to-report calculate-desired-heading [ collective-forward collective-sideways ]
+  if collective-forward = 0 and collective-sideways = 0
+  [ report 0 ] ;; default to straight ahead
+  report atan collective-sideways collective-forward
+end
+
+
+;;====================================================
+;; Given a desired heading and a speed, this calculates the thrust provided by the right thruster. 
+;;
+;; Presently it does not use any intricate trigonometry. If the AUV is to turn left, then the right thruster is set to full thrust.
+;; If the AUV is to turn right, then the thruster linearly decreases between 0 and 90 degrees. If the AUV has to turn around 180 (or more)
+;; degrees, then the thurster is either full or completely off. 
+;;====================================================
+to-report right-thruster-speed [  desired-heading desired-speed ]
+  let ratio 0
+  
+  ;; when desired-heading (DH) is 0, ratio should be 1, to go forwards. 
+  ;; when DH is 90, ratio should be zero, to stop the thruster and allow the left thruster to push the AUV round. 
+  ;; When DH is 179, ratio should be near -1, to pull the AUV round in combination with left thruster pushing. 
+  if desired-heading >= 0 and desired-heading <= 180
+  [  set ratio (90 - desired-heading) / 90  ] 
+     
+  if desired-heading > 180
+  [  set ratio 1  ] 
+  
+  report ratio * desired-speed
+end
+
+;;====================================================
+;; Given a desired heading and a speed, this calculates the thrust provided by the left thruster. 
+;;
+;; Presently it does not use any intricate trigonometry. If the AUV is to turn right, then the left thruster is set to full thrust.
+;; If the AUV is to turn left, then the thruster linearly decreases between 0 and 90 degrees. If the AUV has to turn around 180 (or more)
+;; degrees, then the thurster is either full or completely off.
+;;====================================================
+to-report left-thruster-speed [  desired-heading desired-speed  ]
+  let ratio 0
+  
+  if desired-heading >= 0 and desired-heading < 180
+  [  set ratio 1  ]
+  
+  ;; when desired-heading (DH) is 181, raio should be near -1, to pull the AUV round in combination with right thruster pushing
+  ;; when DH is 270, ratio should be zero to let right thurster push AUV round
+  ;; when DH is 0, ratio should be 1 to push AUV forward. 
+  if desired-heading >= 180 and desired-heading < 360
+  [  set ratio (desired-heading - 270) / 90  ]
+    
+  report ratio * desired-speed  
+end
+
+
+;;====================================================
+;; Called by every AUV to set up. 
+;;====================================================
+to Controller-setup
+  
+  controller-boids-buoyancy-stay
+  
+  set state "normal"
+  
+  ;;-----------------------------------------
+  ;; these variables concern algorithmic performance.
+  set boids-swarm-center-weight   0.5  ;; default value = 0.5       
+  set boids-boid-avoidance-weight 1.0  ;; default value = 1.0
+  set boids-match-velocity-weight 1.0  ;; default value = 1.0
+  
+  set boids-collision-threshold 100       ;; in terms of sensor readings, the distance at which this AUV attempts to avoid others around it. 
+  set boids-wall-threshold 50             ;; in terms of sensor readings, the distance at which an AUV attempts to avoid walls. 
+  set boids-surface-threshold 50          ;; depth pressure get smaller the closer we get to the surface
+  
+  set boids-forward-movement-bias 75     ;; default value = 75 
+  set boids-observe-backwards false
+  set boids-max-rotational-sensor-influence 1.0
+  set boids-min-rotational-sensor-influence 0.0
+  ;;-----------------------------------------
+  
+  set swarm-center-sideways 0 ;; positive numbers are right, negative are left
+  set swarm-center-forward 0 ;; positive numbers are forward, negative are back
+  set swarm-center-up 0      ;; positive numbers are up, negative are down. 
+   
+  set boid-avoidance-sideways 0
+  set boid-avoidance-forward  0
+  set boid-avoidance-up       0 
+  
+  set match-velocity-sideways 0
+  set match-velocity-forward  0
+  set match-velocity-up       0
+ 
+  set prev-boid-distance-f    0
+  set prev-boid-distance-fru  0
+  set prev-boid-distance-frd  0
+  set prev-boid-distance-fld  0
+  set prev-boid-distance-flu  0
+  set prev-boid-distance-bu   0
+  set prev-boid-distance-bru  0
+  set prev-boid-distance-brd  0
+  set prev-boid-distance-bd   0
+  set prev-boid-distance-bld  0
+  set prev-boid-distance-blu  0
+  set prev-boid-distance-b    0
+   
+  set match-velocity-differences-f    (list 0 0 0 0 0  0 0 0 0 0)  ;; initialise the velocity matching linked lists with zeros. 
+  set match-velocity-differences-fru  (list 0 0 0 0 0  0 0 0 0 0)
+  set match-velocity-differences-frd  (list 0 0 0 0 0  0 0 0 0 0)
+  set match-velocity-differences-fld  (list 0 0 0 0 0  0 0 0 0 0)
+  set match-velocity-differences-flu  (list 0 0 0 0 0  0 0 0 0 0)
+  set match-velocity-differences-bu   (list 0 0 0 0 0  0 0 0 0 0)
+  set match-velocity-differences-bru  (list 0 0 0 0 0  0 0 0 0 0)
+  set match-velocity-differences-brd  (list 0 0 0 0 0  0 0 0 0 0)
+  set match-velocity-differences-bd   (list 0 0 0 0 0  0 0 0 0 0)
+  set match-velocity-differences-bld  (list 0 0 0 0 0  0 0 0 0 0)
+  set match-velocity-differences-blu  (list 0 0 0 0 0  0 0 0 0 0)
+  set match-velocity-differences-b    (list 0 0 0 0 0  0 0 0 0 0)
+  
+  set swarm-in-range true
+  
+    ;; these flags are purely for data collection, and have no influence on algorithmic behaviour. 
+  set swarm-in-range-data-collection true 
+  set collect-data-flag false
+  ;; temporary
+  ;set swarm-center-forward random 200  
+end
+
+
+;; sets a fixed velocity forward motion.
+to controller-boids-forward
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 191) ; ~75% forward speed for left thruster
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 191) ; ~75% forward speed for right thruster
+end
+
+
+;; stops the robot.
+to controller-boids-stop
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 0) ; ~0% forward speed for left thruster
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 0) ; ~0% forward speed for right thruster
+end
+
+
+to controller-boids-buoyancy-stay
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values 0) ; set buoyancy to remain at current depth
+end
+
+to controller-boids-left 
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 0) ;; 0% speed for left thruster
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 191) ;; 75% speed for right thruster
+end
+
+to controller-boids-right
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 191) ;; 75% speed for left thruster
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 0) ;; 0% speed for right thrus
+end

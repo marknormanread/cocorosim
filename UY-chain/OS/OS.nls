@@ -1,0 +1,663 @@
+;; Owned by UY, provides operating system functionality in the simulation. 
+;;
+;;
+
+globals
+[
+  OS_show_LEDs           ;; whether or not to show text above AUVs that indicates LED status. Defaults to 0. Set to 1 to turn on LED display 
+  OS_avoid_threshold     ;; Positive value in meters. Represents the distance from walls/floor at which obstacle avoidance is activated
+  OS_avoid_surface_threshold ;; same but for water surface. Value must be negative, to indicate distance below sea level
+  OS_avoid_floor_threshold   ;; positive value, threshold distance from the sea bed at which obstacle avoidance activates, in meters
+  
+  OS_lily_BL_range
+  OS_lily_RF_range
+]
+
+turtles-own
+[
+  OS_version             ;; records the AUV type that the OS is running on. Can be either "lily","jeff","dummy". 
+  OS_bluelight_range        ;; the range of the bluelight on this AUV, in meters. These are used to sense other AUVs
+  OS_active_bluelight_range ;; the range of the active bluelight sensors on this AUV, in meters. These are used in collision detection
+  OS_bluelight_aperture     ;; the aperture of the bluelight sensors on this AUV
+  OS_RF_range
+  
+  OS_LED1                ;; state of LED1 
+  OS_LED2                ;; state of LED2 
+  OS_LED3                ;; state of LED3 
+  
+  OS_arc_movement        ;; boolean, true or false. True = arc movement being performed (controller engaged), false = direct motor control
+  OS_arc_gain            ;; dictates how fast an AUV should turn. Values between 1 and 20 are stable, 20 indicates very fast turn
+  OS_arc_desired_heading ;; the heading (in degrees) that an AUV should turn towards
+  OS_arc_desired_speed   ;; the forward speed that should be maintained as the AUV turns
+  
+  OS_avoid                       ;; boolean, is wall avoidance function of OS active or not? False means no wall avoidance will take place
+  OS_horizontal_avoid_active    ;; boolean. True indicates that horizontal wall avoidance is currently taking place, and the controller is being overridden. 
+  OS_vertical_avoid_active       ;; boolean. True indicates that vertical surface/floor avoidance is currently taking place, and the controller is being overridden. 
+  OS_horr_avoid_des_head         ;; the desired heading that the horizontal avoidance algorithm will try to achieve in avoiding the wall
+  
+  ;;-------------------------
+  ;; The mode that buoyancy control is in. This is used because it engages/disengages different controllers.
+  ;; '1' - direct speed control. 
+  ;; '2' - direct depth control. 
+  OS_buoy_mode           
+  OS_buoy_des_depth  ;; the desired depth that the AUV should dive/rise to. Expressed in meters. Values should be negative. -1 = 1 meter under water. 
+  OS_buoy_des_speed  ;; the desired vertical speed that the AUV should dive/rise at. Expressed in m/s. Positive values indicate rising to surface.
+  ;;-------------------------
+]
+
+;;=============================================
+;;
+;;=============================================
+to OS-setup
+  HAL-setup
+  set OS_avoid true                       ;; By default, AUVs start with obstacle avoidance active
+  set OS_avoid_surface_threshold -0.5     ;; in meters, the depth at which avoidance activates (has to be negative)
+  set OS_avoid_floor_threshold 0.2        ;; in meters, the distance from sea bed at which vertical avoidance activates
+  set OS_horizontal_avoid_active false    ;; no obstacles are currently being avoided
+  set OS_vertical_avoid_active false      ;; no obstacles are currently being avoided  
+  set OS_arc_movement false               ;; AUVs do not start in arc-movement mode  
+  set OS_buoy_mode "1"                    ;; start in speed mode
+  set OS_buoy_des_speed 0                 ;; ... and remain stationary
+  
+  set OS_lily_BL_range 0.5                ;; range of BL in meters
+  set OS_lily_RF_range 0.5                ;; range of RF signal in meters
+end
+
+to OS-setup-DUMMY
+  OS-setup                                ;; setup some general defaults
+  set OS_version "dummy"
+  set OS_bluelight_range 1.0 
+  set OS_RF_range 1.0
+  set OS_active_bluelight_range 0.5
+  set OS_bluelight_aperture 90  
+  set OS_avoid_threshold 0.5              ;; how close an AUV can get to a wall before it trys to avoid it. Expressed in meters
+end
+
+to OS-setup-Lily
+  OS-setup                                ;; setup some general defaults
+  set OS_version "lily"
+  set OS_bluelight_range 0.5
+  set OS_active_bluelight_range 0.3 
+  set OS_bluelight_aperture 125  
+  set OS_avoid_threshold 0.25             ;; how close an AUV can get to a wall before it trys to avoid it. Expressed in meters  
+  
+  set OS_RF_range OS_lily_RF_range
+end
+
+
+
+;;=============================================
+;; This should call the HAL functionality, since that it going to be an OS function. 
+;;=============================================
+to OS-update  
+  ask all-robots               ;; all robots (= AUVs & base stations) are updated
+  [ 
+    if OS_version = "lily"       ;; this is here so that the effect of different bluelight ranges can be examined experimentally
+    [  set OS_bluelight_range OS_lily_BL_range  ]
+
+    
+    robotmodel-update-sensors  ;; update sensor values in volts
+    HAL-update-sensors         ;; raw sensor values are processed in the HAL 
+    
+    ;; subsumption architecture. Only run the controller if there are no obstacles to avoid. 
+    if not (OS_horizontal_avoid_active or OS_vertical_avoid_active)
+    [  
+      controller-update          ;; update the controller
+    ]
+    
+    OS_run                     ;; performs housekeeping for the OS
+    HAL-update-actuators       ;; integer output from the controller is processed into volt values in the HAL
+  ]
+end
+
+
+;;=============================================
+;; Performs OS background functions
+;;=============================================
+to OS_run
+   
+  if OS_avoid     ;; run the obstacle avoidance algorithm only if it is active
+  [  OS_obstacle_avoidance  ]
+
+  ;;--------------------------------
+  ;; Buoyancy control. Covers both controller and avoidance function.
+  if OS_buoy_mode = "2"   ;; depth mode. 
+  [ set OS_buoy_des_speed OS_buoy_depth_controller OS_buoy_des_depth ]  ;; controller returns desired speed required to achieve desired depth
+  let buoyancy-motor-setting OS_buoy_speed_controller OS_buoy_des_speed ;; controller returns value for buoyancy pump based on desired speed 
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values buoyancy-motor-setting)  ;; set the buoyancy pump
+  ;;--------------------------------  
+
+  if OS_arc_movement        ;; employs a PD controller to turn the AUV towards a desired heading whilst maintaining a particular speed   
+  [
+    let left-thrust  (OS_arc_desired_speed / 100) * 127   ;; scale percentages onto actual HAL values
+    let right-thrust (OS_arc_desired_speed / 100) * 127 
+
+    ;; MV - manipulated variabe. It is the difference in thruster values required to make the turn. Usually half is added to each thruster
+    ;; However, if the AUV is already moving quickly, this can exceed maximum thruster values. 
+    ;; As such, some adjustement is made, to maintain MV by re-distributing it amongst thrusters. 
+    ;; Note however that at maximum gain it may still not be possible to achieve MV and the desired speed. 
+    let MV OS_arc_PD ;; negative values indicate turn clockwise
+    set left-thrust left-thrust - (MV / 2)
+    set right-thrust right-thrust + (MV / 2)
+    
+    if left-thrust > 127
+    [
+       let diff left-thrust - 127
+       set right-thrust right-thrust - diff 
+       set left-thrust 127
+    ]
+    if right-thrust > 127
+    [ 
+      let diff right-thrust - 127
+      set left-thrust left-thrust - diff
+      set right-thrust 127
+    ] 
+    if left-thrust < -127
+    [
+      let diff -127 - left-thrust
+      set right-thrust right-thrust + diff
+      set left-thrust -127
+    ]
+    if right-thrust < -127
+    [
+      let diff -127 - right-thrust
+      set left-thrust left-thrust + diff
+      set right-thrust -127
+    ]
+    
+    if  left-thrust >  127 [ set left-thrust 127 ]
+    if right-thrust >  127 [ set right-thrust 127 ]
+    if  left-thrust < -127 [ set left-thrust -127 ]
+    if right-thrust < -127 [ set right-thrust -127 ]   
+      
+    set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values left-thrust) ;; speed for left thruster
+    set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values right-thrust) ;; speed for right thrus
+  ]
+end
+
+
+
+;;============================================
+;; The OS obstacle avoidance (OS) algorithm. OA is independent for horizontal and vertical movement, since these two forms of movement are 
+;; controlled independently of one another. 
+;;
+;; Horizontal movement concerns avoiding walls sensed on front/back/left/right sensors. 
+;; Based on the proximity to obstacles as read on each of the sensors, a desired heading is calculated that should take the most direct
+;; path away from all obstacles. The OS arc function is used to follow this path. 
+;;
+;; Vertical movement concerns avoiding the tank floor and surface. The sensors operate slightly differently from one another and as such
+;; have slightly different avoidance thresholds. 
+;; The buoyancy control is used to manipulate AUV depth. The force applied to avoid the obstacle is proportional to the proximity to it. 
+;; 
+;; Termination of horizontal OA results in a simple forward movement. For vertical OA the AUV remains vertically stationary. It is up
+;; to the controller to dictate AUV movement once the obstacle has been avoided. 
+;;============================================
+to OS_obstacle_avoidance
+  let active-distance-front OS_sens_active_front
+  let active-distance-right OS_sens_active_right
+  let active-distance-left  OS_sens_active_left
+  let active-distance-back  OS_sens_active_back
+  let depth-pressure OS_sens_pressure
+  let active-distance-down OS_sens_active_down
+  
+  ;;-------------------------------------
+  ;; horizontal avoidance of walls  
+  let avoid-forwards 0    ;; positive values mean move forwards to avoid. 
+  let avoid-sideways 0    ;; positive values mean move to the right to avoid. 
+  set OS_horizontal_avoid_active false      ;; assume no avoidance taking place by default. The following may override this. 
+  
+  if active-distance-front < OS_avoid_threshold
+  [ 
+    let infringement OS_avoid_threshold - active-distance-front 
+    set avoid-forwards avoid-forwards - infringement
+  ]
+  if active-distance-back < OS_avoid_threshold
+  [ 
+    let infringement OS_avoid_threshold - active-distance-back
+    set avoid-forwards avoid-forwards + infringement
+  ]  
+  if active-distance-left < OS_avoid_threshold
+  [ 
+    let infringement OS_avoid_threshold - active-distance-left
+    set avoid-sideways avoid-sideways + infringement
+  ]
+  if active-distance-right < OS_avoid_threshold
+  [ 
+    let infringement OS_avoid_threshold - active-distance-right
+    set avoid-sideways avoid-sideways - infringement
+  ]
+  if (avoid-forwards != 0) or (avoid-sideways != 0)
+  [
+    set OS_horizontal_avoid_active true
+    set OS_horr_avoid_des_head OS_orient_rel_to_abs_heading (atan avoid-sideways avoid-forwards)
+    OS_movement_arc OS_horr_avoid_des_head 50 15    ;; some backwards thrust applied to avoid hitting the wall
+  ]
+  ;;-------------------------------------
+
+  ;;-------------------------------------
+  ;; vertical avoidance of surface & floor 
+  if active-distance-down < OS_avoid_floor_threshold    
+  [ 
+    set OS_vertical_avoid_active true
+    let discrepency (OS_avoid_floor_threshold - active-distance-down)
+    OS_buoyancy_set_depth depth-pressure + discrepency + 0.1    ;; set the desired depth 10 cm above the point at which obstacle avoidance is triggered
+  ]
+  if depth-pressure > OS_avoid_surface_threshold  ;; both depth and threshold are represented as negative values (level below sea level)
+  [ 
+    set OS_vertical_avoid_active true
+    ;; incursion over threshold is translated into a speed to move away from the surface    
+    let discrepency (OS_avoid_surface_threshold - depth-pressure)  ;; speed is scaled down by factor of 10
+    OS_buoyancy_set_depth depth-pressure + discrepency - 0.1    ;; set the desired depth 10 cm below the point at which obstacle avoidance is triggered
+  ]
+
+  ;; if vertical avoidance was active, but obstacle has been avoided
+  if (OS_vertical_avoid_active = true) and not (active-distance-down < OS_avoid_floor_threshold or depth-pressure > OS_avoid_surface_threshold) 
+  [ set OS_vertical_avoid_active false  ]   ;; turn off vertical avoidance
+  ;;-------------------------------------  
+end
+
+
+;;============================================
+;; P controller that sets a desired AUV speed in order to achieve a desired depth. Speed is limited to ±5cm/s. Output is in m/s. 
+;;
+;;   desired-depth - values should be negative, and expressed in meters. 
+;;============================================
+to-report OS_buoy_depth_controller [ desired-depth ]
+  let depth-pressure OS_sens_pressure;;              item 11 list-of-sensor-integer-values   ;; a larger value means a deeper AUV.
+  let Kp 1.0;
+    
+  let err desired-depth - depth-pressure   ;; the error is the difference between where the AUV should be, and its current depth
+  let prop Kp * err                        ;; proportion is weight of error
+       
+  if prop < -0.05 [ set prop -0.05 ]       ;; limits for desired speed
+  if prop > 0.05  [ set prop  0.05 ] 
+
+  report prop
+end
+
+
+;;============================================
+;; PD controller that controls the AUV's buoyancy pump to achieve a desired speed. 
+;;
+;;   desired-speed - positive values indicate rising to surface. Should be expressed in m/s. 
+;;============================================
+to-report OS_buoy_speed_controller [ desired-speed ]  ;; positive speeds translate to AUV rising to surface
+  let Kp 1300
+  let Kd 130
+    
+  let err desired-speed - auv-velocity-z   ;; the error
+  let proportion Kp * err
+  let derivative Kd * auv-acceleration-z
+  
+  let MV proportion + derivative
+  
+  if MV > 127  [ set MV  127 ]            ;; enforce limits on what can be sent to the pump
+  if MV < -127 [ set MV -127 ]
+ 
+  report MV
+end
+
+;;============================================
+;; Controllers can use this function to set a desired depth for an AUV
+;;
+;; 'desired-depth' is expressed in meters. Values should be negative. -1 is 1m underwater. -2 is 2 meters underwater. 
+;;============================================
+to OS_buoyancy_set_depth [desired-depth]
+  set OS_buoy_mode "2"     ;; set 'depth' mode.
+  set OS_buoy_des_depth desired-depth
+end
+
+;;============================================
+;; Returns true when AUV has reached the depth it has been instructed to reach, within some tolerance of error. 
+;; If buoyancy mode is "1" (specified speed, not depth) then this procedure always returns true
+;;============================================
+to-report OS_buoyancy_depth_achieved [ tolerance ]
+  ifelse (abs (OS_buoy_des_depth - OS_sens_pressure) < tolerance) or (OS_buoy_mode = "1")
+  [ report true  ]
+  [ report false ]  
+end
+
+;;============================================
+;; Controllers can set a desired dive/rise speed using this function. 
+;; 
+;; positive 'desired-speed' values indicate rise. Negative values translate do diving. 
+;; 'desired-speed' is expressed in meters/second. 
+;;============================================
+to OS_buoyancy_set_speed [desired-speed]
+  set OS_buoy_mode "1"     ;; set 'speed' mode. 
+  set OS_buoy_des_speed desired-speed
+end
+
+
+;;============================================
+;; PD controller (proportion derivative) which calculates the difference in thruster values required
+;; for an AUV to turn and face a particular direction. 
+;;
+;; This controller does not consider a set forwards movement, simply the difference in thruster values. 
+;; There are two components to the controller: proportion and derivative. The proportion component provides
+;; a force to turn towards the desired heading. The derivative component ensures that the desired heading is not
+;; overshot by considering the rotational velocity.
+;;
+;; Controller has three key variables:
+;;   Kp - the weight assigned to the proportion component when deriving an output value
+;;   Kd - weight assigned to the derivative component
+;;   OS_arc_gain - takes values between 1 and 20 (less than one may be possible too). This dictates how fast the AUV
+;;                 turns towards a desired heading.
+;;
+;; These weights are manipulated in providing a 'gain', which dictates the speed at which the AUV should turn to the desired
+;; heading.  
+;;============================================
+to-report OS_arc_PD
+  let Kp 5.0
+  let Kd 10.0
+  
+  let err (subtract-headings OS_sens_compass OS_arc_desired_heading) * (pi / 180)   ;; convert into radians
+  
+  let Kpi Kp * OS_arc_gain
+  let Kdi Kd * (6 * sqrt OS_arc_gain)
+
+  let proportion  Kpi * err
+  let derivative  Kdi * auv-velocity-yaw   
+  
+  report proportion + derivative
+end
+
+
+;;=============================================
+;; Function provides a stable means for a controller to face a desired heading. Controller can also specify a forward/backwards
+;; speed to be maintained whilst performing the turn (this is a rough guide, it is not guaranteed), and can express an urgency
+;; for the turn through the gain. A high gain will perform a very fast turn, low gains are more gradual. 
+;;
+;;   desired-heading - heading to be faced, in degrees. This heading is ABSOLUTE not relative.  
+;;   desired-speed   - forward speed as a percentage of maximium. ±100%. 
+;;   desired-gain    - gain expresses urgency of turn. Can be 0 to 20. 20 is a very fast/aggressive turn.
+;;=============================================
+to OS_movement_arc [desired-heading desired-speed arc-gain]
+  set OS_arc_movement true;           ;; performing an arc movement. 
+  if desired-speed > 100 [ set desired-speed 100 ]
+  if desired-speed < 0   [ set desired-speed 0   ]
+  
+  ;; update only if values have changed
+  if OS_arc_desired_heading != desired-heading or OS_arc_desired_speed != desired-speed or arc-gain != OS_arc_gain
+  [
+    set OS_arc_desired_heading desired-heading
+    set OS_arc_desired_speed   desired-speed
+    set OS_arc_gain arc-gain
+  ]
+end
+
+
+;;=============================================
+;; Returns true when the AUVs heading is within some margin (the tolerance) of a specified absolute heading
+;;=============================================
+to-report OS_movement_heading_achieved [desired-heading tolerance]
+  if abs (subtract-headings desired-heading heading) < tolerance
+  [ report true ]
+  report false
+end
+
+
+;;=============================================
+;; Converts a relative heaing on a particular AUV to an absolute heading. E.g., if an AUV wants to turn 270 degrees clockwise in relation 
+;; to where it is now, this method can be used. Degrees are always added clockwise. 
+;;=============================================
+to-report OS_orient_rel_to_abs_heading [rel-heading]
+  report (heading + rel-heading) mod 360
+end
+
+;;=============================================
+;; Converts an absolute heading (with north being 0 degrees) to a relative heading on an AUV. EG, if the AUV is facing 315 degrees, 
+;; and there is a target at 270 absolute heading, then this funciton will return 315 degrees (same as -45)
+;;=============================================
+to-report OS_orient_abs_to_rel_heading [abs-heading]
+  report (abs-heading - heading) mod 360
+end
+
+;;=============================================
+;; Provides direct control of AUV thrusters. 
+;;
+;; Percent can be ±100. Zero is stationary.
+;;=============================================
+to OS_movement_right_thruster[percent]
+  set OS_arc_movement false;
+  let raw_val (percent / 100) * 127     ;; scales percent onto the range of values that the HAL takes. 
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values raw_val) ;; set speed for right thruster  
+end
+
+;;=============================================
+;; Provides direct control of AUV thrusters. 
+;;
+;; Percent can be ±100. Zero is stationary.
+;;=============================================
+to OS_movement_left_thruster[percent]
+  set OS_arc_movement false;  
+  let raw_val (percent / 100) * 127     ;; scales percent onto the range of values that the HAL takes. 
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values raw_val) ;; set speed for left thruster  
+end
+
+
+;;=============================================
+;; Procedures for displaying LED state above AUVs. State should be either "0" or "1".
+;;=============================================
+to OS_set_LED1_state [led-state]
+  set OS_LED1 led-state
+  OS_update_LEDs
+end
+
+to OS_set_LED2_state [led-state]
+  set OS_LED2 led-state
+  OS_update_LEDs
+end
+
+to OS_set_LED3_state [led-state]
+  set OS_LED3 led-state
+  OS_update_LEDs
+end
+
+
+to OS_update_LEDs
+  if OS_show_LEDs = 1             ;; only execute if LED status is to be shown. 
+  [
+    let disp "___"                ;; default is to show all zeros. 
+    if OS_LED1 = 1
+    [ set disp replace-item 0 disp "*" ]
+    if OS_LED2 = 1
+    [ set disp replace-item 1 disp "*" ]
+    if OS_LED3 = 1
+    [ set disp replace-item 2 disp "*" ]
+    set label disp
+  ]
+end
+
+
+;;=============================================
+;; The following are sensor query functions. Care must be taken to access the correct functions only when creating controllers
+;; for specific AUVs. A Jeff can see the Lily sensor queries, but they won't return sensible values. The alternative to this is to 
+;; overhaul the RobotModel / HAL files, which is a good idea, except that it will break other peoples' code. So I (MR) haven't 
+;; done this yet, but increasingly there will be functions provided at the OS level that do not require the RobotModel/HAL 
+;; procedures. 
+;;=============================================
+
+;;----------------------------
+;; Passive bluelight sensors. These are used to communicate with and sense other AUVs.
+;;----------------------------
+to-report OS_sens_BL_front
+  report sensor-bluelight-distance 0 0 OS_bluelight_range OS_bluelight_aperture     ;; args: heading, pitch, range, aperture
+end
+
+to-report OS_sens_BL_front_right
+  report sensor-bluelight-distance 60 0 OS_bluelight_range OS_bluelight_aperture     ;; args: heading, pitch, range, aperture  
+end
+
+to-report OS_sens_BL_front_left
+  report sensor-bluelight-distance -60 0 OS_bluelight_range OS_bluelight_aperture     ;; args: heading, pitch, range, aperture  
+end
+
+to-report OS_sens_BL_right
+  report sensor-bluelight-distance 90 0 OS_bluelight_range OS_bluelight_aperture    ;; args: heading, pitch, range, aperture
+end
+
+to-report OS_sens_BL_left
+  report sensor-bluelight-distance -90 0 OS_bluelight_range OS_bluelight_aperture   ;; args: heading, pitch, range, aperture
+end
+
+to-report OS_sens_BL_back_right
+  report sensor-bluelight-distance 120 0 OS_bluelight_range OS_bluelight_aperture     ;; args: heading, pitch, range, aperture  
+end
+
+to-report OS_sens_BL_back_left
+  report sensor-bluelight-distance -120 0 OS_bluelight_range OS_bluelight_aperture     ;; args: heading, pitch, range, aperture  
+end
+
+to-report OS_sens_BL_back
+  report sensor-bluelight-distance 180 0 OS_bluelight_range OS_bluelight_aperture   ;; args: heading, pitch, range, aperture
+end
+
+
+
+to-report OS_sens_BL_up
+  report sensor-bluelight-distance 0 90 OS_bluelight_range OS_bluelight_aperture    ;; args: heading, pitch, range, aperture 
+end
+
+to-report OS_sens_BL_down
+  report sensor-bluelight-distance 0 -90 OS_bluelight_range OS_bluelight_aperture   ;; args: heading, pitch, range, aperture
+end
+
+
+;;----------------------------
+;; Active distance sensors. These are used to detect obstacles like the tank perimeter
+;;----------------------------
+to-report OS_sens_active_front
+  report sensor-active-border-distance 0 OS_active_bluelight_range OS_bluelight_aperture
+end
+
+to-report OS_sens_active_front_right
+  report sensor-active-border-distance 60 OS_active_bluelight_range OS_bluelight_aperture
+end
+
+to-report OS_sens_active_front_left
+  report sensor-active-border-distance -60 OS_active_bluelight_range OS_bluelight_aperture
+end
+
+to-report OS_sens_active_right
+  report sensor-active-border-distance 90 OS_active_bluelight_range OS_bluelight_aperture
+end
+
+to-report OS_sens_active_left
+  report sensor-active-border-distance -90 OS_active_bluelight_range OS_bluelight_aperture
+end
+
+to-report OS_sens_active_back
+  report sensor-active-border-distance 180 OS_active_bluelight_range OS_bluelight_aperture
+end
+
+
+;;----------------------------
+;; returns the distance to the ground in meters. If nothing is observed, returns the maximum sensor range value.  
+;;----------------------------
+to-report OS_sens_active_down
+    ;; patch depth resolution is in patch-lengths (eg, 0.1m). This extracts the finer detail of the AUVs actual depth, 
+    ;; and adds it to the patch depth. EG, the AUV may occupy a patch that has depth 0.3m, but the AUV's z coordinate
+    ;; is 0.47, this will establish that the distance to the ground is actually 0.37. 
+  let depth zcor mod patchlength + patch-ground-distance 
+  
+  ifelse depth < OS_active_bluelight_range    ;; report the sensor range unless the depth is within this range
+  [ report depth ]
+  [ report OS_active_bluelight_range ]
+end
+
+
+;;----------------------------
+;; Active sensors that identify AUVs. The functions return the AUV(s), useful for direct communication between algorithms
+;; without worrying about the communication stack. Algorithms can ask questions of other AUVs observed on sensors using 
+;; netlogo constructs ("ask")
+;;----------------------------
+to-report OS_sens_auv_front
+  report sensor-BL-nearest-AUV 0 0 OS_bluelight_range OS_bluelight_aperture
+end
+
+to-report OS_sens_auv_front_right
+  report sensor-BL-nearest-AUV 60 0 OS_bluelight_range OS_bluelight_aperture
+end
+
+to-report OS_sens_auv_front_left
+  report sensor-BL-nearest-AUV -60 0 OS_bluelight_range OS_bluelight_aperture
+end
+
+to-report OS_sens_auv_right
+  report sensor-BL-nearest-AUV 90 0 OS_bluelight_range OS_bluelight_aperture
+end
+
+to-report OS_sens_auv_left
+  report sensor-BL-nearest-AUV -90 0 OS_bluelight_range OS_bluelight_aperture
+end
+
+to-report OS_sens_auv_back_right
+  report sensor-BL-nearest-AUV 120 0 OS_bluelight_range OS_bluelight_aperture
+end
+
+to-report OS_sens_auv_back_left
+  report sensor-BL-nearest-AUV -120 0 OS_bluelight_range OS_bluelight_aperture
+end
+
+to-report OS_sens_auv_back
+  report sensor-BL-nearest-AUV 180 0 OS_bluelight_range OS_bluelight_aperture
+end
+
+
+to-report OS_sens_auv_up
+  report sensor-BL-nearest-AUV 0 90 OS_bluelight_range OS_bluelight_aperture
+end
+
+to-report OS_sens_auv_down
+  report sensor-BL-nearest-AUV 0 -90 OS_bluelight_range OS_bluelight_aperture 
+end
+
+;; this function finds the neighbours seen on all AUV bluelight sensors. 
+to-report OS_sens_auvs_BL  
+  let neighbours []
+
+  if OS_version = "dummy"
+  [ set neighbours (turtle-set OS_sens_auv_front OS_sens_auv_back OS_sens_auv_left OS_sens_auv_right OS_sens_auv_up OS_sens_auv_down) ]
+  if OS_version = "lily"
+  [ set neighbours (turtle-set  OS_sens_auv_front_right OS_sens_auv_front_left OS_sens_auv_back OS_sens_auv_up OS_sens_auv_down) ]
+  
+  report neighbours
+end
+
+;; this function gathers all AUVs within radio range abd returns them as a turtle-set
+to-report OS_sens_auvs_RF
+  let neighbours own-in-radius (OS_RF_range / patchlength)
+  report neighbours
+end
+
+
+
+to-report OS_sens_pressure
+  let depth 0 - (water-level - zcor) * patchlength   ;; depth is in m, and is negative (indicating level below sea level)
+  report depth
+end
+
+to-report OS_sens_acoustic_distance
+  report item 13 list-of-sensor-integer-values
+end
+
+to-report OS_sens_acoustic_counter
+  report item 12 list-of-sensor-integer-values  
+end
+
+to-report OS_sens_compass
+  report heading
+end
+
+;;----------------------------
+;; not yet implemented
+;;----------------------------
+to-report OS_sens_electric_field
+  report item 15 list-of-sensor-integer-values
+end
+
+
+to-report OS_sens_chemical
+  report item 16 list-of-sensor-integer-values
+end

@@ -1,0 +1,127 @@
+
+
+to Controller-setup
+
+
+;set list-of-internal-values-confinement lput 0 list-of-internal-values-confinement ; after the creation of the distance-to-basestation sensor, the internal "previous tick" integer value of the sensor has to be set.   
+reset-perspective
+end
+
+
+to Controller-update ; empty controller with the following parts: 
+                     ; - performing the standard forward motion (both thrusters 75% forward)
+                     ; - trying to avoid near borders
+                     ; - trying to avoid AUV collisions
+                     ; - using a correlated random walk
+                     ; - keeping the AUV below a certain depth
+                     ; - keeping the AUVs above the ground
+  
+  ; all sensor information in integers                   
+  let passive-distance-front item 0 list-of-sensor-integer-values
+  let passive-distance-right item 1 list-of-sensor-integer-values
+  let passive-distance-back item 2 list-of-sensor-integer-values
+  let passive-distance-left item 3 list-of-sensor-integer-values
+  let passive-distance-up item 4 list-of-sensor-integer-values  
+  let passive-distance-down item 5 list-of-sensor-integer-values  
+  
+  let active-distance-front item 6 list-of-sensor-integer-values  
+  let active-distance-right item 7 list-of-sensor-integer-values  
+  let active-distance-back item 8 list-of-sensor-integer-values
+  let active-distance-left item 9 list-of-sensor-integer-values  
+  
+  let distance-to-ground item 10 list-of-sensor-integer-values
+  let depth-pressure item 11 list-of-sensor-integer-values ; IMPORTANT: As of now, "depth" is the distance to the water surface (=pressure), so a higher value really means a deeper AUV.
+  let number-of-near-robots item 12 list-of-sensor-integer-values
+ 
+ 
+  controller-standard-forward-motion ; 75% forward motion
+;  
+; 
+;  ; border avoidance; leads to a counter-clockwise rotation of the AUVs after a while
+;  ifelse (active-distance-front > 0) ; when there is an obstacle/wall inside the frontal active sensor range
+;    [ 
+;    ifelse (active-distance-front > 0)
+;      [ controller-actuator-left-stop] ; if the border is *very* close always turn soft. 
+;      [ controller-actuator-left-decrease controller-actuator-left-decrease] ; if the border is not as close, turn soft left; 
+;    ]  
+;    
+;    [ ; when AUV observes nothing in front
+;    ifelse ((active-distance-right > 0) and (active-distance-left > 0)) 
+;       [ controller-actuator-left-stop] ; if there are close borders to both sides (e.g. corners), then make a hard left turn
+;       [ ; if only one side sensor perceives an object
+;       ifelse (active-distance-right > 0) ; if AUV observes object to right
+;         [controller-actuator-left-decrease] ; soft turn left
+;         [ ; if no object to the right
+;         ifelse (active-distance-left > 0) ; if AUV observes object to left
+;           [controller-actuator-right-decrease] ; soft turn right
+;           [ ; if no objects were perceived
+;           ; AUV collision avoidance
+;           ifelse (passive-distance-front > 150) ; when there is a very near AUV in front
+;             [controller-actuator-left-stop controller-actuator-right-stop controller-actuator-left-increase] ; stop thrusters when there is another AUV very close in front; increase left thruster to make a slow right turn
+;             [ ; if there is not AUV near in front
+;             ifelse (random-float 1.0 < 0.5) ; randomized soft turn; "correlated random walk"
+;               [controller-actuator-left-increase] ; turn either right (50% chance)
+;               [controller-actuator-right-increase] ; or left (50% chance)
+;             ]
+;           ]       
+;         ]
+;       ]     
+;     ]   
+  ; after all avoidance behaviours
+  ; keep a certain depth
+  if (depth-pressure < 125)   [controller-buoyancy-sink] ;; (note that depth-pressure is the distance from the water surface) AUV is getting too high (or pressure too low) -> AUV should sink
+  if (distance-to-ground > 0) [controller-buoyancy-rise] ;; AUV is getting too close to the ground -> AUV should rise
+      
+end
+
+
+to controller-standard-forward-motion
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 96) ; ~75% forward speed for left thruster
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 96) ; ~75% forward speed for right thruster
+end
+
+
+to controller-actuator-left-increase
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values (item 0 list-of-actuator-integer-values + 16)) ; increase forward speed for left thruster  
+end
+
+
+to controller-actuator-right-increase
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values (item 1 list-of-actuator-integer-values + 16)) ; increase forward speed for right thruster    
+end
+
+
+to controller-actuator-left-decrease
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values (item 0 list-of-actuator-integer-values - 16)) ; increase forward speed for left thruster  
+end
+
+
+to controller-actuator-right-decrease
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values (item 1 list-of-actuator-integer-values - 16)) ; increase forward speed for right thruster    
+end
+
+
+
+to controller-actuator-left-stop  
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 0) ; set forward speed for left thruster to 0    
+end
+
+
+to controller-actuator-right-stop
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 0) ; set forward speed for right thruster to 0
+end
+
+
+to controller-buoyancy-sink
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values -64) ; set buoyancy to sink at half speed
+end
+
+
+to controller-buoyancy-rise
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values 64) ; set buoyancy to rise at half speed
+end
+
+
+to controller-buoyancy-stay
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values 0) ; set buoyancy to remain at current depth
+end

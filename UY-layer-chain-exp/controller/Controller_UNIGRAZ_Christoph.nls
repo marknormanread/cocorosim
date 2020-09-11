@@ -1,0 +1,772 @@
+; CONTROLLER DESCRIPTION
+
+; This controller has several parts that are used to demonstrate local cognition in a swarm of AUVs.
+; It is meant to be used in a large, bordered tank where the AUVs are initially randomly distributed.
+; The AUVs use a basic border-collision-avoidance and swim around randomly.
+; As soon as they are in the (short) range of the simulated blue-light sensor of other near AUVs, they try to stay close to them and form a shoal that also swims around randomly.
+; This usually leads to the aggregation of most AUVs to one big shoal.
+; Inside this shoal (but also when they are alone), the AUVs try to find out the size of their shoal by broadcasting short information packages about their locally percepted swarm.
+; The spreading of this local information throughout the shoal then allows each member of the shoal to have a good estimate of the "real" shoal size.
+; Outlook: Once the shoal size is above a certain threshold (e.g. 75% of all AUVs) the shoal can then change its behaviour to whatever is needed in the scenario.
+
+turtles-own [
+  list-of-internal-values-confinement ; internal memory for the confinement behaviour
+  list-of-internal-values-beeclust ; internal memory for the BEECLUST behaviour
+  list-of-internal-values-swarmsizeID ; internal memory for the swarmsize measurement behaviour (using IDs)
+  list-of-internal-values-relayswarm ; internal memory for the relayswarm behaviour
+  list-of-internal-values-chemical ; internal memory for the Emergent Taxis behaviour
+  ]
+
+
+
+to Controller-setup
+  
+ set list-of-internal-values-confinement []
+ set list-of-internal-values-beeclust []
+ set list-of-internal-values-relayswarm []
+ set list-of-internal-values-swarmsizeID []
+ set list-of-internal-values-chemical [] ; here we store the maximum sensed chemical concentration
+
+set list-of-internal-values-confinement lput 0 list-of-internal-values-confinement ; after the creation of the distance-to-basestation sensor, the internal "previous tick" integer value of the sensor has to be set.   
+set list-of-internal-values-confinement lput 0 list-of-internal-values-confinement ; longturncounter
+
+set label-color black
+
+set list-of-internal-values-beeclust lput 0 list-of-internal-values-beeclust    ;item 0 = turning counter
+set list-of-internal-values-beeclust lput 0 list-of-internal-values-beeclust    ;item 1 = turning direction; -1=LEFT 1=RIGHT 
+set list-of-internal-values-beeclust lput 0 list-of-internal-values-beeclust    ;item 2 = waiting counter
+set list-of-internal-values-beeclust lput 0 list-of-internal-values-beeclust    ;item 3 = state
+
+let mypacket sentence who [false false 0]
+set list-of-internal-values-relayswarm lput mypacket list-of-internal-values-relayswarm    
+; item 0 is the whoID of the AUV
+; item 1 is the state if the AUV is directly connected to the base-station
+; item 2 is the state if the AUV is indirectly connected to the base-station
+; item 3 is number of hops to the basestation (if the AUV is indirectly connected to the base-station)
+
+set list-of-internal-values-chemical lput 0 list-of-internal-values-chemical ; actual concentration; added a very low value to avoid div/0 in computations later on
+;set list-of-internal-values-chemical lput 1 list-of-internal-values-chemical ; set to 1, shoaling as usual
+
+end
+
+
+
+to Controller-update ; empty controller with the following parts: 
+                     ; - performing the standard forward motion (both thrusters 75% forward)
+                     ; - trying to avoid near borders
+                     ; - trying to avoid AUV collisions
+                     ; - using a correlated random walk
+                     ; - keeping the AUV below a certain depth
+                     ; - keeping the AUVs above the ground
+  
+ 
+  let active-distance-front item 6 list-of-sensor-integer-values  
+  let active-distance-right item 7 list-of-sensor-integer-values  
+  let active-distance-back item 8 list-of-sensor-integer-values
+  let active-distance-left item 9 list-of-sensor-integer-values  
+  
+  let distance-to-ground item 10 list-of-sensor-integer-values
+  let depth-pressure item 11 list-of-sensor-integer-values ; IMPORTANT: As of now, "depth" is the distance to the water surface (=pressure), so a higher value really means a deeper AUV.
+  
+  let number-of-near-robots item 12 list-of-sensor-integer-values
+
+  let distance-to-basestation-new item 13 list-of-sensor-integer-values ; this sensor value is only useful in comparison to the old value, thus the next two lines are neccesary
+  let distance-to-basestation-old item 0 list-of-internal-values-confinement ; old distance to basestation is needed to decide whether AUV moves closer or farther away from the basestation 
+  set list-of-internal-values-confinement replace-item 0 list-of-internal-values-confinement distance-to-basestation-new  ; the actual value is internally stored for the calculations in the next tick
+  let longturncounter item 1 list-of-internal-values-confinement
+
+;set label longturncounter
+
+ifelse (FALSE) [controller-BEECLUST]    
+  [
+
+  ; other behaviours 
+  controller-standard-forward-motion ; 75% forward motion, also keeping same depth
+  ; border avoidance; leads to a counter-clockwise rotation of the AUVs after a while
+  ifelse ((active-distance-front > 0) or (active-distance-left > 0) or (active-distance-right > 0)) ; when there is an obstacle/wall inside the frontal active sensor range
+    [ 
+    ifelse (active-distance-left > active-distance-right) [controller-actuator-right-decrease] [controller-actuator-left-decrease]
+    ]
+    [
+
+    ; no border -> depth checks (for not getting to high and for not getting too low)   
+    ifelse (depth-pressure < 25) [controller-buoyancy-sink] ; (note that depth-pressure is the distance from the water surface) AUV is getting too high (or pressure too low) -> AUV should sink
+      [
+      ifelse  (distance-to-ground > 3) [controller-buoyancy-rise] ; AUV is getting too close to the ground -> AUV should rise      
+        [
+        ; no border and depth okay -> confinement check 
+        ifelse ((confinement-behaviour? = TRUE) and (((distance-to-basestation-new > 200) and (distance-to-basestation-new > distance-to-basestation-old)) or (longturncounter > 0))) ; if the confinement-behaviour is set to TRUE in the experiment.nls, then the AUVs try to stay within a certain distance to the basestation.
+          [ ; If the distance gets larger than 175/255=75% of the acoustic distance sensor range, AND if the distance has become larger since the last tick, then make a soft left turn     
+          if (random-float 1.0 < 0.3) [reset-confinement-longturncounter]
+          repeat ((random 2) + 4) 
+            [
+            ifelse (who mod 2 = 0) [controller-actuator-right-decrease] [controller-actuator-left-decrease]
+            ]
+          decrease-confinement-longturncounter
+          ]      
+          ; if no confinement turned off, or insude/outside of confinement zone 
+          [
+          if (FALSE) [controller-Shoaling]
+          if (TRUE) [controller-EmergentTaxis]
+          if (FALSE) [controller-RandomWalk]
+          ]
+        ]
+      ]
+    ]  
+  ; after all avoidance behaviours
+  ; keep a certain depth
+  ;if (depth-pressure < 125)   [controller-buoyancy-sink] ;; (note that depth-pressure is the distance from the water surface) AUV is getting too high (or pressure too low) -> AUV should sink
+  ;if (distance-to-ground > 0) [controller-buoyancy-rise] ;; AUV is getting too close to the ground -> AUV should rise
+  ;if ((depth-pressure >= 125) and (distance-to-ground = 0)) [controller-buoyancy-stay]
+  ]
+
+if (measure-swarmsize?) [controller-update-swarmsize-ID]
+      
+end
+
+
+to controller-standard-forward-motion
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 96) ; ~75% forward speed for left thruster
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 96) ; ~75% forward speed for right thruster
+  controller-buoyancy-stay ; stay at this depth
+end
+
+
+to controller-actuator-left-increase
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values (item 0 list-of-actuator-integer-values + 16)) ; increase forward speed for left thruster  
+end
+
+
+to controller-actuator-right-increase
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values (item 1 list-of-actuator-integer-values + 16)) ; increase forward speed for right thruster    
+end
+
+
+to controller-actuator-left-decrease
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values (item 0 list-of-actuator-integer-values - 16)) ; increase forward speed for left thruster  
+end
+
+
+to controller-actuator-right-decrease
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values (item 1 list-of-actuator-integer-values - 16)) ; increase forward speed for right thruster    
+end
+
+
+
+to controller-actuator-left-stop  
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 0) ; set forward speed for left thruster to 0    
+end
+
+
+to controller-actuator-right-stop
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 0) ; set forward speed for right thruster to 0
+end
+
+
+to controller-buoyancy-sink
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values -64) ; set buoyancy to sink at half speed
+end
+
+
+to controller-buoyancy-rise
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values 64) ; set buoyancy to rise at half speed
+end
+
+
+to controller-buoyancy-stay
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values 0) ; set buoyancy to remain at current depth
+end
+
+
+to reset-confinement-longturncounter
+  set list-of-internal-values-confinement replace-item 1 list-of-internal-values-confinement 5  
+end
+
+
+to decrease-confinement-longturncounter
+  set list-of-internal-values-confinement (replace-item 1 list-of-internal-values-confinement (item 1 list-of-internal-values-confinement - 1))   
+end
+
+
+
+to controller-update-swarmsize-ID
+
+; first, update the information about myself (always the same)
+let mypacket []
+set mypacket (sentence who [34 0])
+set list-of-internal-values-swarmsizeID fput mypacket list-of-internal-values-swarmsizeID
+
+let listlength (length list-of-internal-values-swarmsizeID) 
+
+; go through the list
+let m 0
+while [m < listlength]
+  [
+  let thiswho (item 0 (item m list-of-internal-values-swarmsizeID))
+  let thiscountdown (item 1 (item m list-of-internal-values-swarmsizeID))
+  let thishopcount (item 2 (item m list-of-internal-values-swarmsizeID))
+
+; second, decrease the countdown of all packages  
+  set list-of-internal-values-swarmsizeID replace-item m list-of-internal-values-swarmsizeID (sentence thiswho (thiscountdown - 1) thishopcount)    
+  
+; third, remove packages which are too old (countdown <= 0)
+  if (thiscountdown <= 0) 
+    [
+    set list-of-internal-values-swarmsizeID remove-item m list-of-internal-values-swarmsizeID 
+    set listlength (length list-of-internal-values-swarmsizeID)
+    ] 
+  set m m + 1
+  ]
+
+; fourth, sort the list by AUV IDs
+set list-of-internal-values-swarmsizeID sort-by [(item 0 ?1) < (item 0 ?2)] list-of-internal-values-swarmsizeID 
+
+; fifth, sort the list again by countdowns (AUV IDs still sorted!)
+set list-of-internal-values-swarmsizeID sort-by [((item 0 ?1) = (item 0 ?2)) and ((item 1 ?1) > (item 1 ?2))] list-of-internal-values-swarmsizeID 
+
+set listlength (length list-of-internal-values-swarmsizeID) 
+
+; go through the list again
+let n 0 
+while [n < (listlength - 1)] ; always compare this packet to the next packet, thus the last packet does not compare (no next packet) 
+  [
+  let thispacket (item n list-of-internal-values-swarmsizeID)
+  let nextpacket (item (n + 1) list-of-internal-values-swarmsizeID)
+  let thiswho (item 0 (item n list-of-internal-values-swarmsizeID))
+  let thiscountdown (item 1 (item n list-of-internal-values-swarmsizeID))
+  let nextwho (item 0 (item (n + 1) list-of-internal-values-swarmsizeID))
+  let nextcountdown (item 1 (item (n + 1) list-of-internal-values-swarmsizeID))
+  let thishopcount (item 2 (item n list-of-internal-values-swarmsizeID))
+ 
+; sixth, replace "older" information about the same AUV by newer information about the same AUV      
+  if (thiswho =  nextwho) 
+    [
+    ifelse (thiscountdown >= nextcountdown) 
+      [
+      set list-of-internal-values-swarmsizeID replace-item (n + 1) list-of-internal-values-swarmsizeID thispacket 
+      ]
+      [
+      set list-of-internal-values-swarmsizeID replace-item n list-of-internal-values-swarmsizeID nextpacket ; because the list was sorted before, this should not be mandatory        
+      ] 
+    ]
+    set n n + 1
+  ]
+  
+; seventh, remove duplicate information    
+set list-of-internal-values-swarmsizeID remove-duplicates list-of-internal-values-swarmsizeID
+;print who
+;print list-of-internal-values-swarmsizeID
+;print " "
+
+; eight, determine swarmsize
+let myswarmsize (length list-of-internal-values-swarmsizeID)
+
+; do something, e.g. set color (or aggregate):  
+set color (45 + (5 * (myswarmsize / (number-of-all-robots + 1)))) ; AUV changes color depending on how many other AUVs are in the (connected) swarm
+set label myswarmsize
+;if (color > 50) [controller-actuator-left-stop controller-actuator-right-stop controller-buoyancy-stay] ; if more than 60/255= 23,5% of all other AUVs-DUMMY are seen, stop
+;if (color > 50) [set color 65] ; keep same color if stopped
+
+; ninth, send own swarmsize information to all other AUVs in range;   
+if (random 6 = 0)
+  [
+  set color red
+  ask near-robots 
+    [    
+    set list-of-internal-values-swarmsizeID sentence ([list-of-internal-values-swarmsizeID] of myself) list-of-internal-values-swarmsizeID  
+    ]  
+  ]
+  
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+to controller-BEECLUST
+
+  ; all sensor information in integers                   
+  let passive-distance-front item 0 list-of-sensor-integer-values
+  let passive-distance-right item 1 list-of-sensor-integer-values
+  let passive-distance-back item 2 list-of-sensor-integer-values
+  let passive-distance-left item 3 list-of-sensor-integer-values
+  let passive-distance-up item 4 list-of-sensor-integer-values  
+  let passive-distance-down item 5 list-of-sensor-integer-values  
+  
+  let active-distance-front item 6 list-of-sensor-integer-values  
+  let active-distance-right item 7 list-of-sensor-integer-values  
+  let active-distance-back item 8 list-of-sensor-integer-values
+  let active-distance-left item 9 list-of-sensor-integer-values  
+  
+  let distance-to-ground item 10 list-of-sensor-integer-values
+  let depth-pressure item 11 list-of-sensor-integer-values ; IMPORTANT: As of now, "depth" is the distance to the water surface (=pressure), so a higher value really means a deeper AUV.
+  let number-of-near-robots item 12 list-of-sensor-integer-values
+  
+  let electric-field-sensor item 14 list-of-sensor-integer-values
+
+  ;set local variables
+  let turning-counter item 0 list-of-internal-values-beeclust 
+  let turning-direction item 1 list-of-internal-values-beeclust  
+  let state item 3 list-of-internal-values-beeclust
+  let waiting-counter item 2 list-of-internal-values-beeclust
+  
+  let sensor-range 100 ;sensor-range describes range for active sensing (wall detection)
+  let robot-detection-range 150
+  
+;wall avoidance-----------------------------------------------
+
+ifelse (turning-counter <= 0) and (waiting-counter <= 0);IF AUV is NOT busy in turning
+[
+  ifelse ((active-distance-front < sensor-range) and (active-distance-right < sensor-range) and (active-distance-left < sensor-range)) and (passive-distance-front < robot-detection-range)   ;IF no obstacles in sight OR no robots in sight
+  [
+    set color yellow
+    controller-standard-forward-motion           ;MOVE
+    
+    if (depth-pressure < 200)  [controller-buoyancy-sink] ;; (note that depth-pressure is the distance from the water surface) AUV is getting too high (or pressure too low) -> AUV should sink
+    if (distance-to-ground > 10) [controller-buoyancy-rise] ;; AUV is getting too close to the ground -> AUV should rise                                                                                          
+  ]
+  [
+    ;IF OBSTACLES STOP
+    set color green
+    
+    controller-actuator-left-stop                ;stop the engines
+    controller-actuator-right-stop
+    controller-buoyancy-stay
+    set turning-counter 4
+    
+    ifelse (active-distance-left < active-distance-right) 
+    [
+      set turning-direction -1
+    ]
+    [
+      set turning-direction 1
+    ]
+    set state 1 
+  ]
+  
+]
+[
+  
+  if turning-direction = -1
+  [turn-left]
+  if turning-direction = 1
+  [turn-right]
+  
+  set turning-counter turning-counter - 1
+]
+
+;STATEMACHINE------------------------------------------------------------------------------------------------
+
+if state = 0;normal movement-------------------------------------------------------------------------------------------
+[
+  
+]
+
+if state = 1;calculating waiting-time--------------------------------------------------------------------------
+[
+  ifelse  (passive-distance-front > 0)
+  [
+    set waiting-counter (electric-field-sensor * 5)
+    set state 2
+  ]
+  [
+    set state 0
+  ]
+]
+
+if state = 2;waiting state-----------------------------------------------------------------------------------------------
+[
+  set color red
+  ifelse waiting-counter > 0
+  [  
+     controller-actuator-left-stop                ;stop the engines
+     controller-actuator-right-stop
+     controller-buoyancy-stay
+     set waiting-counter waiting-counter - 1
+  ] 
+  [
+     set state 3
+  ]
+]
+
+
+if state = 3;reset controller-----------------------------------------------------------------------------------------------
+[
+  set color white
+  set state 0 
+]
+
+  ;write local variables back to AUV's own list-of-integer-values
+  set list-of-internal-values-beeclust replace-item 0 list-of-internal-values-beeclust turning-counter
+  set list-of-internal-values-beeclust replace-item 1 list-of-internal-values-beeclust turning-direction
+  set list-of-internal-values-beeclust replace-item 3 list-of-internal-values-beeclust state
+  set list-of-internal-values-beeclust replace-item 2 list-of-internal-values-beeclust waiting-counter
+  
+end
+
+;DIFFERENT MOVEMENTS*****************************************************************************************************************************************************
+
+to turn-right
+  controller-actuator-right-stop
+  controller-actuator-left-full
+end
+
+to turn-left
+  controller-actuator-left-stop
+  controller-actuator-right-full
+end
+
+to controller-actuator-left-full  
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 127) ; set forward speed for left thruster to 0    
+end
+
+to controller-actuator-right-full 
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 127) ; set forward speed for left thruster to 0    
+end
+
+
+
+
+to controller-Shoaling
+
+  ; all sensor information in integers                   
+  let passive-distance-front item 0 list-of-sensor-integer-values
+  let passive-distance-right item 1 list-of-sensor-integer-values
+  let passive-distance-back item 2 list-of-sensor-integer-values
+  let passive-distance-left item 3 list-of-sensor-integer-values
+  let passive-distance-up item 4 list-of-sensor-integer-values  
+  let passive-distance-down item 5 list-of-sensor-integer-values
+
+; AUV collision avoidance
+ifelse (passive-distance-front > 150) ; when there is a very near AUV in front
+  [controller-actuator-left-stop controller-actuator-right-stop controller-actuator-left-increase] ; stop thrusters when there is another AUV very close in front; increase left thruster to make a slow right turn
+  [ ; if there is no AUV near in front
+    ; SHOALING PART: very rough, will be improved in the future
+  ifelse (passive-distance-front >= 180) 
+    [controller-actuator-left-increase controller-actuator-left-increase controller-actuator-right-decrease] ;robot ahead too near -> turn right  
+    [
+    if ((passive-distance-left > passive-distance-right) and (passive-distance-left >= 180)) [controller-actuator-left-increase controller-actuator-right-decrease] ;robot left too near        
+    if (passive-distance-right >= 180) [controller-actuator-right-increase controller-actuator-left-decrease] ;robot right too near -> turn left
+    if (passive-distance-up > 40) [controller-buoyancy-sink] ;robot above too near -> sink             
+    if (passive-distance-down > 40) [controller-buoyancy-rise] ;robot below too near -> rise            
+    if ((passive-distance-left > 0) and (passive-distance-left <= 120)) [controller-actuator-right-increase controller-actuator-left-decrease] ;robot left too far
+    if ((passive-distance-right > 0) and (passive-distance-right <= 120)) [controller-actuator-left-increase controller-actuator-right-decrease] ;robot right too far                                
+    if ((passive-distance-back > 0) and (passive-distance-back <= 90)) [controller-actuator-left-increase controller-actuator-left-increase controller-actuator-right-decrease] ;robot behind too far -> turn         
+    if ((passive-distance-up > 0) and (passive-distance-up <= 200)) [controller-buoyancy-rise] ;robot above too far -> rise             
+    if ((passive-distance-down > 0) and (passive-distance-down <= 200)) [controller-buoyancy-sink] ;robot below too far -> sink                   
+    ]              
+    if (not any? near-robots) ; if alone
+      [ ; if alone, correlated random walk
+       ifelse (random-float 1.0 < 0.5) ; randomized soft turn; randomized depth; "correlated random walk"
+         [controller-actuator-left-increase controller-buoyancy-sink] ; turn either right (~50% chance; a tiny bit more likely)
+         [controller-actuator-right-increase controller-buoyancy-rise] ; or left (50% chance; a tiny bit less likely) 
+      ]
+   ]               
+
+end
+
+
+to controller-EmergentTaxis
+  
+  ; all sensor information in integers                   
+  let passive-distance-front item 0 list-of-sensor-integer-values
+  let passive-distance-right item 1 list-of-sensor-integer-values
+  let passive-distance-back item 2 list-of-sensor-integer-values
+  let passive-distance-left item 3 list-of-sensor-integer-values
+  let passive-distance-up item 4 list-of-sensor-integer-values  
+  let passive-distance-down item 5 list-of-sensor-integer-values
+  let chemical-concentration-here item 16 list-of-sensor-integer-values
+  let max-chemical-concentration item 0 list-of-internal-values-chemical  
+
+  if ((ticks mod 120) = 0) [set list-of-internal-values-chemical replace-item 0 list-of-internal-values-chemical chemical-concentration-here] ; forget the maximum concentration once in a while
+ 
+  if (((ticks mod 7) = 0) and (chemical-concentration-here > max-chemical-concentration)) ; every 7th tick (moved to new patch) check if the concetration has become higher
+    [
+    set list-of-internal-values-chemical replace-item 0 list-of-internal-values-chemical (chemical-concentration-here - 0.0001)  ; update if the chem concentration measured is higher than the previous maximum; set new maximum if true
+    ]
+  let gradient-factor 0
+  ifelse (chemical-concentration-here > max-chemical-concentration) [set gradient-factor 0.75] [set gradient-factor 1]
+  if (passive-distance-front > 0) [set gradient-factor 1]
+  ;set gradient-factor (max-chemical-concentration / chemical-concentration-here)
+  ;if (gradient-factor > 1) [set gradient-factor 1]
+  ;if (gradient-factor < 0.5) [set gradient-factor 0.5]
+  set color scale-color yellow gradient-factor 1.1 0.4
+  ;print gradient-factor
+;  if (who = 0) 
+;    [
+;    print word "max-c:" max-chemical-concentration
+;    print word "chem-h:" chemical-concentration-here
+;    print word "grad-f:" gradient-factor
+;    print " "
+;    ]
+; AUV collision avoidance
+ifelse (passive-distance-front > 150) ; when there is a very near AUV in front
+  [controller-actuator-left-stop controller-actuator-right-stop controller-actuator-left-increase] ; stop thrusters when there is another AUV very close in front; increase left thruster to make a slow right turn
+  [ ; if there is no AUV near in front
+    ; SHOALING PART: very rough, will be improved in the future
+  ifelse (passive-distance-front >= 180 / gradient-factor) 
+    [controller-actuator-left-increase controller-actuator-left-increase controller-actuator-right-decrease] ;robot ahead too near -> turn right  
+    [
+    if ((passive-distance-left > passive-distance-right) and (passive-distance-left >= 180 / gradient-factor)) [controller-actuator-left-increase controller-actuator-right-decrease] ;robot left too near        
+    if (passive-distance-right >= 180 / gradient-factor) [controller-actuator-right-increase controller-actuator-left-decrease] ;robot right too near -> turn left
+    
+    if (passive-distance-up > 180 / gradient-factor) [controller-buoyancy-sink] ;robot above too near -> sink             
+    if (passive-distance-down > 180 / gradient-factor) [controller-buoyancy-rise] ;robot below too near -> rise            
+    
+    if ((passive-distance-left > ((1 - gradient-factor) * 160)) and (passive-distance-left <= 140 * gradient-factor)) [controller-actuator-right-increase controller-actuator-left-decrease] ;robot left too far
+    if ((passive-distance-right > ((1 - gradient-factor) * 160)) and (passive-distance-right <= 140 * gradient-factor)) [controller-actuator-left-increase controller-actuator-right-decrease] ;robot right too far                                
+    if ((passive-distance-back > ((1 - gradient-factor) * 160)) and (passive-distance-back <= 120 * gradient-factor)) [controller-actuator-left-increase controller-actuator-left-increase controller-actuator-right-decrease] ;robot behind too far -> turn         
+    if ((passive-distance-up > ((1 - gradient-factor) * 160)) and (passive-distance-up <= 200 * gradient-factor)) [controller-buoyancy-rise] ;robot above too far -> rise             
+    if ((passive-distance-down > ((1 - gradient-factor) * 160)) and (passive-distance-down <= 200 * gradient-factor)) [controller-buoyancy-sink] ;robot below too far -> sink                   
+    ]              
+    if (true);(not any? near-robots) ; if alone
+      [ ; if alone, correlated random walk
+       ifelse (random-float 1.0 < 0.5) ; randomized soft turn; randomized depth; "correlated random walk"
+         [controller-buoyancy-rise] ; turn either right (~50% chance; a tiny bit more likely)
+         [controller-buoyancy-sink] ; or left (50% chance; a tiny bit less likely) 
+      ]
+   ]               
+
+end
+
+
+
+to controller-RandomWalk
+
+; thruster test code: 
+;set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values leftspeed) ; increase forward speed for left thruster  
+;set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values rightspeed) ; increase forward speed for left thruster    
+
+ifelse (random-float 1.0 < 0.5) ; randomized soft turn; randomized depth; "correlated random walk"
+  [controller-actuator-left-increase controller-buoyancy-sink] ; turn either right (~50% chance; a tiny bit more likely)
+  [controller-actuator-right-increase controller-buoyancy-rise] ; or left (50% chance; a tiny bit less likely) 
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+to controller-RelaySwarm
+
+  ; all sensor information in integers                   
+  let passive-distance-front item 0 list-of-sensor-integer-values
+  let passive-distance-right item 1 list-of-sensor-integer-values
+  let passive-distance-back item 2 list-of-sensor-integer-values
+  let passive-distance-left item 3 list-of-sensor-integer-values
+  let passive-distance-up item 4 list-of-sensor-integer-values  
+  let passive-distance-down item 5 list-of-sensor-integer-values 
+   
+; RELAYSWARM behaviour
+ifelse (passive-distance-front >= 180) 
+  [controller-actuator-left-decrease controller-actuator-right-decrease] ;robot ahead too near -> slow down  
+  [
+  if ((passive-distance-left > passive-distance-right) and (passive-distance-left >= 180)) [controller-actuator-left-increase controller-actuator-right-decrease] ;robot left too near        
+  if (passive-distance-right >= 180) [controller-actuator-right-increase controller-actuator-left-decrease] ;robot right too near -> turn left
+  if ((passive-distance-left > 0) and (passive-distance-left <= 120)) [controller-actuator-right-increase controller-actuator-left-decrease] ;robot left too far
+  if ((passive-distance-right > 0) and (passive-distance-right <= 120)) [controller-actuator-left-increase controller-actuator-right-decrease] ;robot right too far                                
+  if ((passive-distance-back > 0) and (passive-distance-back <= 90)) [controller-actuator-left-increase controller-actuator-left-increase controller-actuator-right-decrease] ;robot behind too far -> turn         
+  ]              
+  if (not any? near-robots) ; if alone
+    [ ; if alone, correlated random walk
+     ifelse (random-float 1.0 < 0.5) ; randomized soft turn; "correlated random walk"
+       [controller-actuator-left-increase] ; turn either right (50% chance)
+       [controller-actuator-right-increase] ; or left (50% chance)  
+    ]
+     
+  
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+to controller-update-connection-to-base
+
+let number-of-near-robots item 12 list-of-sensor-integer-values
+
+
+; first part, sets flag if AUV is near basestation
+let distance-to-basestation item 13 list-of-sensor-integer-values
+ifelse (distance-to-basestation < 50) ; if AUV is very near to the basestation
+  [
+  set list-of-internal-values-relayswarm replace-item 1 list-of-internal-values-relayswarm true ; direct connection to basestation
+  set list-of-internal-values-relayswarm replace-item 2 list-of-internal-values-relayswarm true ; indirect connection to basestation  
+  set list-of-internal-values-relayswarm replace-item 3 list-of-internal-values-relayswarm 1 ; 1 hop away from basestation
+  ]
+  [
+  set list-of-internal-values-relayswarm replace-item 1 list-of-internal-values-relayswarm false ; no direct connection to basestation
+  ]
+  
+
+let direct-connection-to-basestation? item 1 list-of-internal-values-relayswarm  
+let indirect-connection-to-basestation? item 2 list-of-internal-values-relayswarm  
+let hops-to-basestation item 3 list-of-internal-values-relayswarm 
+
+; first, update the information about myself (always the same)
+let mypacket []
+set mypacket lput who mypacket
+set mypacket lput direct-connection-to-basestation? mypacket
+set mypacket lput indirect-connection-to-basestation? mypacket
+set mypacket lput hops-to-basestation mypacket
+
+set list-of-internal-values-relayswarm fput mypacket list-of-internal-values-relayswarm
+
+let listlength (length list-of-internal-values-relayswarm) 
+
+
+;BAUSTELLE:
+
+; go through the list
+let m 0
+while [m < listlength]
+  [
+  let thiswho (item 0 (item m list-of-internal-values-relayswarm))
+  let thisdirectconnection? (item 1 (item m list-of-internal-values-relayswarm))
+  let thisindirectconnection? (item 2 (item m list-of-internal-values-relayswarm))  
+  let thishopcount (item 3 (item m list-of-internal-values-relayswarm))
+
+; second, increase the hopcount of all packages  
+  set list-of-internal-values-relayswarm replace-item m list-of-internal-values-relayswarm (sentence thiswho thisdirectconnection? thisindirectconnection? (thishopcount + 1))    
+  
+; third, remove packages which where the hopcount is too high (hopcount > 30)
+  if (thishopcount >= 30) 
+    [
+    set list-of-internal-values-relayswarm remove-item m list-of-internal-values-relayswarm 
+    set listlength (length list-of-internal-values-relayswarm)
+    ] 
+  set m m + 1
+  ]
+
+; fourth, sort the list by AUV IDs
+set list-of-internal-values-relayswarm sort-by [(item 0 ?1) < (item 0 ?2)] list-of-internal-values-relayswarm 
+
+; fifth, sort the list again by countdowns (AUV IDs still sorted!)
+set list-of-internal-values-relayswarm sort-by [((item 0 ?1) = (item 0 ?2)) and ((item 1 ?1) > (item 1 ?2))] list-of-internal-values-relayswarm 
+
+set listlength (length list-of-internal-values-relayswarm) 
+
+; go through the list again
+let n 0 
+while [n < (listlength - 1)] 
+  [
+  let thispacket (item n list-of-internal-values-relayswarm)
+  let nextpacket (item (n + 1) list-of-internal-values-relayswarm)
+  let thiswho (item 0 (item n list-of-internal-values-relayswarm))
+  let thiscountdown (item 1 (item n list-of-internal-values-relayswarm))
+  let nextwho (item 0 (item (n + 1) list-of-internal-values-relayswarm))
+  let nextcountdown (item 1 (item (n + 1) list-of-internal-values-relayswarm))
+  let thishopcount (item 2 (item n list-of-internal-values-relayswarm))
+ 
+; sixth, replace "older" information about the same AUV by newer information about the same AUV      
+  if (thiswho =  nextwho) 
+    [
+    ifelse (thiscountdown >= nextcountdown) 
+      [
+      set list-of-internal-values-relayswarm replace-item (n + 1) list-of-internal-values-relayswarm thispacket 
+      ]
+      [
+      set list-of-internal-values-relayswarm replace-item n list-of-internal-values-relayswarm nextpacket ; because the list was sorted before, this should not be mandatory        
+      ] 
+    ]
+    set n n + 1
+  ]
+  
+; seventh, remove duplicate information    
+set list-of-internal-values-relayswarm remove-duplicates list-of-internal-values-relayswarm
+;print who
+;print list-of-internal-values-swarmsizeID
+;print " "
+
+; eigth, determine swarmsize
+let myswarmsize (length list-of-internal-values-relayswarm)
+
+; do something, e.g. set color (or aggregate):  
+set color (45 + (5 * (myswarmsize / (number-of-all-robots + 1)))) ; AUV changes color depending on how many other AUVs are in the (connected) swarm
+set label myswarmsize
+;if (color > 50) [controller-actuator-left-stop controller-actuator-right-stop controller-buoyancy-stay] ; if more than 60/255= 23,5% of all other AUVs-DUMMY are seen, stop
+;if (color > 50) [set color 65] ; keep same color if stopped
+
+; ninth, send own swarmsize information to all other AUVs in range;   
+if (random 6 = 0)
+  [
+  set color red
+  ask near-robots 
+    [    
+    set list-of-internal-values-relayswarm sentence ([list-of-internal-values-relayswarm] of myself) list-of-internal-values-relayswarm  
+    ]  
+  ]
+  
+  
+end

@@ -1,0 +1,400 @@
+
+globals [ ; physical properties of the world and of the robots are global variables 
+  AUV-width;
+  AUV-heigth;
+  AUV-length;
+  AUV-volume;
+  AUV-cross-section;
+  AUV-weight;
+  AUV-drag-coefficient;
+  density-water;
+  AUV-g;
+  AUV-thruster-separation   ;; Note that this is from the centre, not from eachother!
+  AUV-thruster-distance-center-rotation  ;; how far the thrusters are from the point around which the AUV spins when one is in full reverse, the other full forward
+  AUV-thruster-angle-normal-rotation     ;; angle of thrustesr to the point around which the AUV spins when one is in full reverse, the other full forward
+  AUV-terminal-velocity     ;; terminal straight-line translational velocity
+  
+  max-speed-per-step
+  max-acceleration;
+  make-ground-dell?
+  rigid-body-physics      ;; when set to true this loads rigid body physics. When sent to false it loads the 'rails' version.           
+
+] 
+
+turtles-own [
+  ;;------------------------------------------
+  ;; These two variables are for user convenience. Given the movement that the AUV *actually* makes (rather than what controllers ask it to make), calculated
+  ;; in this module, these vectors are populated with values. They can be very useful for algorithmic analysis, or any analysis that requires information as
+  ;; to the movement that the AUV is making. 
+  ;; 
+  ;;  auv-movement-vector describes the displacement of the AUV from the last time step as a three dimensional vector, held as a list. [X Y Z]
+  ;;  auv-movement-unit-vector is a unit vector of the above. If the AUV is not moving, the unit vector is deliberately set to be zero in magnitude. 
+  auv-movement-vector     ;; the movememnt actually performed. This is a list [X Y Z]. This is expressed in meters (not patches!). 
+  auv-movement-unit-vector;; 
+  auv-movement-heading    ;; the heading in which the AUV moved last step (this is not necessarily the same as where it is facing)
+  auv-movement-pitch      ;; the pitch in which the AUV moved last step (this is not necessarily the same as where it is facing)
+  ;;------------------------------------------
+]
+
+to core-setup-world ;function has to exist
+; called at the beginning of the setup to generate the environment (no robots!)
+      
+  ask patches 
+    [ ;; set the following states for each patch
+    set border? false
+    set water? false
+    set ground? false
+    set patch-ground-distance 999
+    set electric-value 0
+    ]
+  
+  ifelse make-ground-terrain? 
+    [
+     core-make-ground-terrain
+    ]
+    [ ;; if the terrain on bottom of tank is not to be created, however the bottom of the tank is still solid. 
+      ask patches with [ pzcor = min-pzcor ]
+      [
+        set ground? true 
+        set pcolor brown
+      ]
+    ]
+  
+  if make-borders? 
+    [
+    core-make-borders
+    ]
+    
+  ; water ; core
+  if (max-pzcor < water-level) [print "The model's max-pzcor is lower than the water level."]  
+  if make-watersurface? 
+    [   
+    core-make-watersurface
+    ]
+
+  ;; all patches that are not the ground, the boarder, or above the water, are set to water
+  ask patches with [(not border?) and (not ground?) and (pzcor < water-level)] 
+    [
+    set water? true 
+    set pressure (water-level - pzcor) ; here we give every water-patch its pressure value that is equivalent to its distance below the water surface
+    set patch-ground-distance 999 ; default distance is 999 = very high. only a few patches above ground will have low values
+    ] 
+  ;ask patch (12) (15) (5) [ ; user
+  ; sprout-black-boxes 1 [
+  ;  set shape "box" 
+  ;  set size 5
+  ;  set color magenta 
+  ; ] 
+    
+  core-calculate-grounddistance
+   
+  set tank-perimeter patches with [border? = true] 
+  
+    
+  setxyz -10 -40 20 ; sets the position of camera ; user
+  face patch 0 0 0  ; sets the heading of camera ; user
+  zoom -35 ; sets the zoom of camera ; user
+
+end
+
+
+to core-make-ground-terrain
+
+;;  floor ; core
+ ask patches with [ (pzcor = min-pzcor ) ]
+ [ 
+   let height (sin ((distancexyz (max-pxcor * 0.7) (max-pxcor * 0.3) 0) / max-pycor * 360 * 2 * ((random-float 0.06) + 0.97)) * 1.3) + 2
+   let z 0
+   while [z < height] [  ;; every patch between bottom of tank and height, as calcuated above, is set to be solid. 
+     ask patch pxcor pycor (min-pzcor + z) 
+     [
+       set pcolor brown + pzcor  + ( distancexyz 0 -10 0 ) mod 2  
+       set ground? true          
+     ]  
+     set z ( z + 1) 
+   ]
+ ]
+ 
+end
+
+to core-make-ground-dell
+  
+  ;;  floor ; core
+       ask patches with [ (pzcor = min-pzcor ) ]
+       [ 
+         let height (sin ((distancexyz (max-pxcor * 0.7) (max-pxcor * 0.3) 0) / max-pycor * 360 * 2 * ((random-float 0.06) + 0.97)) * 1.3) + 10
+         let z 0
+         while [z < height] [  ;; every patch between bottom of tank and height, as calcuated above, is set to be solid. 
+           ask patch pxcor pycor (min-pzcor + z) 
+           [
+             set pcolor brown + pzcor  + ( distancexyz 0 -10 0 ) mod 0.3  
+             set ground? true          
+           ]  
+           set z ( z + 1) 
+         ]
+       ]
+       
+       ask patch -25 -25 40
+       [
+         ask patches in-radius-nowrap 40
+         [
+           set ground? false
+           set pcolor 0 
+           
+         ] 
+       ]
+       
+       ask patch 25 25 40
+       [
+         ask patches in-radius-nowrap 38
+         [
+           set ground? false
+           set pcolor 0  
+         ] 
+       ]
+end
+
+
+to core-make-borders
+  
+ask patches with [(pxcor = max-pxcor) and (pzcor < (water-level))] 
+  [set pcolor blue set border? true set ground? false] ;creates a blue border
+ask patches with [(pycor = min-pycor) and (pzcor < (water-level))] 
+  [set border? true set ground? false] ;creates an invisible border to the south; for better view
+ask patches with [(pxcor = min-pxcor) and (pzcor < (water-level))] 
+  [set pcolor blue set border? true set ground? false] ;creates a blue border
+ask patches with [(pycor = max-pycor) and (pzcor < (water-level))] 
+  [set pcolor blue set border? true set ground? false] ;creates a blue border  
+  
+end
+
+
+to core-make-watersurface
+
+ask patches with [(pzcor) = (water-level)] 
+  [
+  sprout-water-surfaces 1 
+    [
+    set is-AUV? false
+    set is-base? false
+    set is-robot? false
+    set shape "box"
+    set color blue
+    set pitch (pitch + 90)
+    set size 0.2 
+    let h (sin ((xcor + ycor) / max-pycor * 360 * 2))
+    setxyz (xcor) (ycor) (water-level + (h * 0.3)) 
+    ] 
+  ]
+
+  
+end
+
+
+;;=======================================
+;; Each patch stores its distance from the ground. This speed up execution when AUVs request the distance to the ground. 
+;; This procedure is compatible with non-flat grounds. This procedure must be called again if the ground changes during the simulation.
+;;=======================================
+to core-calculate-grounddistance
+  ;; I (MR) have found no more elegant and computationally efficient way to perform this function. 
+  ;; All patches with the minimum zcor in the simulation are set to have distance from ground of zero. 
+  ;; The following three loops go through each patch, rising from bottom of simulation space to the top. 
+  ;; If a patch represents the ground, it is assigned a distance of zero. 
+  ;; If it does not, then its distance is a patch-length from the ground added to the depth of the patch below it. 
+  ask patches with [pzcor = min-pzcor] 
+  [ set patch-ground-distance 0 ] 
+   
+  let z min-pzcor + 1
+  while [ z <= max-pzcor ]
+  [
+    let x min-pxcor
+    while [ x < max-pxcor ]
+    [
+      let y min-pycor 
+      while [y <= max-pycor]
+      [
+        let this-patch patch x y z 
+        let down-patch patch x y (z - 1) 
+        ifelse [ground?] of this-patch = true
+        [ ask this-patch [ set patch-ground-distance 0 ] ]  ;; if the patch is ground, then set a distance of zero
+        [ ;; otherwise, set a distance a patch-length further from the ground than the patch below it. 
+          let down-ground [patch-ground-distance] of down-patch
+          ask this-patch [ set patch-ground-distance (down-ground + patchlength) ]
+        ]        
+        set y y + 1
+      ]
+      set x x + 1
+    ]  
+    set z z + 1
+  ] 
+end
+
+
+to-report core-create-AUV-DUMMY [this-patch] ; 
+  let my-id nobody
+  ask this-patch 
+  [  
+    sprout-AUVs-DUMMY 1 
+    [
+      core-set-default-robot-settings    
+      set shape "uboot" ; this the AUVs shape. Currently, must be either 'uboot' or 'pisa'. 
+                        ; note that 'base' will create the base station shape. 
+                        ; Pisa is geographically simpler, and hence easier to render. 
+                        ;let randcol 25 + (20 * (round random 5)) ; results in 5 good colors
+                        ;set color randcol               
+      set is-AUV? true
+      set is-base? false      
+
+      set color yellow
+      set my-id turtle who ; must be used for every AUV type for the following procedure
+    ]  
+  ]
+  set all-AUVs   (turtle-set AUVs-Lily AUVs-DUMMY AUVs-Jeff)
+  set all-robots (turtles with [is-robot?])     ;; reset all-turtles to include the one just created
+  report my-id
+end
+
+
+to-report core-create-default-basestation-DUMMY [this-patch] ; 
+  let my-id nobody
+  ask this-patch 
+  [  
+    sprout-basestations-DUMMY 1 
+    [
+      core-set-default-robot-settings
+      set shape "base" ; this the AUVs shape. Currently, must be either 'uboot' or 'pisa'. 
+                       ; note that 'base' will create the base station shape. 
+                       ; Pisa is geographically simpler, and hence easier to render. 
+                       ;let randcol 25 + (20 * (round random 5)) ; results in 5 good colors
+                       ;set color randcol
+      set is-robot? false
+      set is-AUV? false
+      set is-base? true
+
+      set color yellow
+      set size 5
+      set my-id turtle who ; must be used for every AUV type for the following procedure
+    ]  
+  ]
+  set all-AUVs   (turtle-set AUVs-Lily AUVs-DUMMY AUVs-Jeff)  
+  set all-robots (turtles with [is-robot?])     ;; reset all-turtles to include the one just created
+  report my-id
+end
+
+;;=======================================
+;; Create a turtle to represent Lily at the specified patch.
+;;=======================================
+to-report core-create-AUV-Lily [this-patch] ; 
+  let my-id nobody
+  ask this-patch 
+  [  
+    sprout-AUVs-Lily 1 
+    [
+      core-set-default-robot-settings
+      ;set shape "uboot" ; this the AUVs shape. Currently, must be either 'uboot' or 'pisa'. 
+      set shape "jeff" ; TODO jeff needs new core create fn.
+                        ; note that 'base' will create the base station shape. 
+                        ; Pisa is geographically simpler, and hence easier to render. 
+                        ;let randcol 25 + (20 * (round random 5)) ; results in 5 good colors
+                        ;set color randcol      
+      set is-robot? true
+      set is-AUV? true
+      set is-base? false
+      set color yellow
+      set size 1.0         ; Lily is about 10cm in length, corresponding to a patch. 
+      set my-id turtle who ; must be used for every AUV type for the following procedure
+    ]  
+  ]
+  set all-AUVs   (turtle-set AUVs-Lily AUVs-DUMMY AUVs-Jeff)  
+  set all-robots (turtles with [is-robot?])     ;; reset all-turtles to include the one just created
+  report my-id
+end
+
+
+
+to core-set-default-robot-settings ; an empty AUV is initialized with all its memory and a random heading
+                                   ; procedure is run by an AUV. 
+  
+  set list-of-sensor-descriptions []
+  set list-of-sensor-volt-values []
+  set list-of-sensor-integer-values []
+  
+  set list-of-actuator-descriptions []
+  set list-of-actuator-integer-values []
+  set list-of-actuator-volt-values []
+  set is-robot? true
+  set heading (random-float 360)
+  set shape "box"
+  set size 1
+end
+
+
+to core-add-sensor-description [sensor-to-add] ; the sensor lists are created
+  
+    set list-of-sensor-descriptions lput sensor-to-add list-of-sensor-descriptions
+    set list-of-sensor-volt-values lput 0 list-of-sensor-volt-values
+    set list-of-sensor-integer-values lput 0 list-of-sensor-integer-values
+end
+
+to core-add-actuator-description [actuator-to-add] ; the actuator lists are created  
+  
+    set list-of-actuator-descriptions lput actuator-to-add list-of-actuator-descriptions
+    set list-of-actuator-integer-values lput 0 list-of-actuator-integer-values
+    set list-of-actuator-volt-values lput 0 list-of-actuator-volt-values
+end
+
+
+to core-perform-motion ; This procedure is executed by every robot. 
+
+  if ((print-AUV-collisions? and (count other AUVs-DUMMY-here) > 0)) 
+    [show "collision"] ; the simulation prints the turtle identifier and "collision" string in the command center if two AUVs are located on the same patch
+  ifelse (stop-on-obstacle-collisions? and (ground? or border?)) 
+  [ stop ] ; if stop-on-obstacle-collisions? is TRUE and the patch the AUV is located on is either a ground or border patch -> collision -> AUV stops instantly (gets stuck)
+  [ 
+    ifelse rigid-body-physics
+    [ core-calculate-physics-movement-rigid ]
+    [ core-calculate-physics-movement-rails ]
+  ] ; physics simulation of the movement
+end
+
+
+
+;; ###########################################################################
+;; Setting up constants and rates for the physics engine. Note that further setup can be performed
+;; by whichever engine is running. 
+;; ###########################################################################
+to core-setup-physics
+  set density-water 1000   ;; in kg/m³
+  set AUV-g 9.81           ;; in m/s²
+  
+  set AUV-width 0.1        ;; in m
+  set AUV-heigth 0.05      ;; in m
+  set AUV-length 0.1       ;; in m
+  set AUV-cross-section AUV-width * AUV-heigth    ;; in m²
+  set AUV-volume AUV-cross-section * AUV-length   ;; in m³
+  set AUV-weight 0.44         ;; in kg
+  set AUV-thruster-separation 0.025    ;; each thruster is 2.5 cm from the centre axis. 
+
+  core-setup-rigid 
+  core-setup-rails 
+end
+
+
+;; ###########################################################################
+;; Updates the environment. E.g., currents. 
+;; ###########################################################################
+to core-update-physics
+  if rigid-body-physics and simulate-currents  ;; currents can only be simulated with the rigid body physics model
+  [ 
+    core-current-diffusion
+    core-current-decay
+    core-current-maintain-source-sink
+    core-current-AUV-turbulence
+    if current-debug?
+    [ core-current-animate ]
+  ]
+end
+
+
+
+

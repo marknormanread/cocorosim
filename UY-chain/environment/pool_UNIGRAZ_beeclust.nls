@@ -1,0 +1,6 @@
+
+to setup-environment
+  show "setting up pool environment."
+  resize-world -50 50 -50 50 -2 40
+  
+end

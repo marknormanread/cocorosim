@@ -1,0 +1,395 @@
+;;====================================================
+;;====================================================
+;;
+;; Boids implementation, but used in the relay chain
+;; 
+;; In boids, each boid follows the following three rules:
+;; 1) Collision avoidance, avoid collisions with nearby objects
+;; 2) Velocity matching, try to match velocity with nearby boids. 
+;; 3) Flock centering, try to stay close to nearby boids. 
+;;
+;; Orginal boids implementation found on this webpage: http://www.red3d.com/cwr/boids/
+;;
+;;====================================================
+;;====================================================
+
+ 
+turtles-own 
+[  
+  ;; these variables comprise a vector indicating the perceived center of the swarm, relative to the current AUV
+  cohesion-sideways ;; positive numbers are right, negative are left
+  cohesion-forward  ;; positive numbers are forward, negative are back
+  cohesion-up       ;; positive numbers are up, negative are down. 
+  
+  ;; these variables comprise a vector of prefered movement to avoid hitting other AUVs. 
+  separation-sideways
+  separation-forward
+  separation-up
+  
+  ;; these variables comprise a vector of preferred movement to match the velocity of other AUVs seen around it (through blue light sensors)
+  alignment-sideways
+  alignment-forward
+  alignment-up
+
+  swarm-in-range         ;; used to indicate when the swarm is sensed within range. AUVs may remain stationary under two conditions, 
+                         ;; the swarm-related forces acting upon it dictate that it should remain so, or it cannot perceive any of the swarm, 
+                         ;; and so remains still. In the latter case, this variable is set to ensure the AUV moves. 
+  swarm-in-range-data-collection
+  
+  ;; these are temp stores of distance to other AUVs registered on the sensors, used to prevent unnecessary double computation
+  distance-front-right 
+  distance-front-left
+  distance-back 
+  distance-up  
+  distance-down
+  neighbours-RF
+  
+  shoal-restricted            ;; boolean, when set to true there are limits on exceeding depths and moving in certain headings
+  shoal-restricted-heading    ;; the heading in which no more movement may take place
+  shoal-restricted-depth      ;; AUV may go no deeper than this
+  shoal-restricted-shallow    ;; AUV may go no shallower than this
+]
+
+
+
+
+;;========================================================
+;; Called by the OS to step the controller. 
+;;========================================================
+to controller-chain-shoal-update  
+  ;;------------------------------ 
+  ;; store distances to AUVs, and ignore those that are not shoaling (because, for example, they are members of the relay chain)
+  ;; if necessary.
+  set distance-front-right  OS_bluelight_range
+  set distance-front-left   OS_bluelight_range
+  set distance-back         OS_bluelight_range
+  set distance-up           OS_bluelight_range
+  set distance-down         OS_bluelight_range   
+  
+  chain-shoal-filter-neighbours           ;; throw out some neighbours, depending on algorithmic state
+  ;;------------------------------  
+  
+  let desired-speed (0.8 * cs-max-speed)  ;; default case, overridden if there are neighbours on which to base movement
+  let desired-absolute-heading heading    ;; default case, overridden if there are neighbours on which to base movement
+  let desired-dive-speed 0  
+  let turn-gain 3
+   
+  set swarm-in-range false                ;; default case, overridden if there are neighbours on which to base movement         
+  if count neighbours-RF != 0
+  [  
+    set swarm-in-range true
+    
+    ;;------------------------------
+    ;; separation and cohesion require relative location of AUVs. This can either come from a global, perfect triangulation, or from 
+    ;; perception of distance on sensors. If sensors are used, then the orientation of an auv within the sensor cone is not possible. 
+    ;; This switches between the two. 
+    calculate-cohesion-sensor-triangulation
+    calculate-separation-sensor-triangulation
+    
+    ;;------------------------------
+    ;; alignment depends on deriving the velocities (heading and speed) of neighbouring AUVs and attempting to match them. 
+    calculate-alignment
+    ;;------------------------------
+
+    ;; take averages, and normalise
+    let sum-weights (cs-cohesion-weight + cs-separation-weight + cs-alignment-weight)
+    let collective-forward (( (cs-cohesion-weight   * cohesion-forward  ) 
+                            + (cs-separation-weight * separation-forward) 
+                            + (cs-alignment-weight  * alignment-forward )) 
+                            /  sum-weights) 
+    let collective-sideways ((  (cs-cohesion-weight   * cohesion-sideways  ) 
+                              + (cs-separation-weight * separation-sideways) 
+                              + (cs-alignment-weight  * alignment-sideways )) 
+                              / sum-weights)
+    
+    let collective-up   ((  (cs-cohesion-weight * cohesion-up) 
+                           + (cs-separation-weight * separation-up) 
+                           + (cs-alignment-weight * alignment-up)) 
+                           /  sum-weights) 
+                                           
+    set chain-motion-up       chain-motion-up + collective-up
+    set chain-motion-forwards chain-motion-forwards + collective-forward
+    set chain-motion-sideways chain-motion-sideways + collective-sideways                      
+
+    ;; desired heading is relative to the boid. Desired speed is interpreted as a percentage of maximum thrust
+    let desired-heading calculate-desired-heading chain-motion-forwards chain-motion-sideways  ;; This is relative to the AUV
+    set desired-absolute-heading (OS_orient_rel_to_abs_heading desired-heading)
+    set desired-speed   calculate-desired-speed   chain-motion-forwards chain-motion-sideways
+    set desired-speed min (list (cs-speed-scalar * desired-speed) cs-max-speed)  ;; upper limit on what desired speed can be
+      
+    let displacement sqrt ( (chain-motion-forwards ^ 2) + (chain-motion-sideways ^ 2))      ;; magnitude of impetus to move in horizontal plane
+    set turn-gain min (list (20 * (displacement / (0.6 * OS_bluelight_range))) 20)     ;; turn-gain can't be more than 20
+    
+      ;; ensuring that values passed to buoyancy actuators do not exceed sensible values
+    set desired-dive-speed chain-motion-up * 0.1
+  ]
+  
+  if (count neighbours-RF = 0) and (chain-alg-state != "chain")
+  [ set shoal-restricted false ]                                         ;; can't be restricted if you can't see anyone else
+
+  ifelse shoal-restricted
+  [
+    if subtract-headings desired-absolute-heading shoal-restricted-heading < 90
+    [ set desired-absolute-heading (shoal-restricted-heading + 180) mod 360]
+    
+    if OS_sens_pressure < shoal-restricted-depth
+    [ set desired-dive-speed 0.01 ]
+    
+    if OS_sens_pressure > shoal-restricted-shallow
+    [ set desired-dive-speed -0.01 ]
+    
+    ;; inform neighbours of the restriction, and this includes if the restriction has changed
+    ask neighbours-RF with [(shoal-restricted = false) or (shoal-restricted-heading != [shoal-restricted-heading] of myself)]    
+    [ chain-shoal-restrict [shoal-restricted-heading] of myself [shoal-restricted-depth] of myself [shoal-restricted-shallow] of myself ]
+  ][
+    ask neighbours-RF with [shoal-restricted = true]                    ;; inform neighbours of the derestriction    
+    [ chain-shoal-derestrict ]
+  ]
+  
+  ;; instruct the OS of the desired horizontal and vertical movements here
+  OS_movement_arc desired-absolute-heading desired-speed turn-gain
+  OS_buoyancy_set_speed desired-dive-speed
+end
+
+
+;;========================================================
+;; Neighbouring AUVs are either ignored or not, depending on which shoal they belong to. This procedure filters neighbours on this basis.
+;;========================================================
+to chain-shoal-filter-neighbours
+
+  if (exploratory-auv? self)
+  [
+    if (OS_sens_auv_front_right != nobody) and (exploratory-auv? OS_sens_auv_front_right )
+    [ set distance-front-right  OS_sens_BL_front_right ]
+    
+    if (OS_sens_auv_front_left != nobody)  and (exploratory-auv? OS_sens_auv_front_left )
+    [ set distance-front-left   OS_sens_BL_front_left ]
+    
+    if (OS_sens_auv_back != nobody)        and (exploratory-auv? OS_sens_auv_back )
+    [ set distance-back         OS_sens_BL_back ]
+    
+    if (OS_sens_auv_up != nobody)          and (exploratory-auv? OS_sens_auv_up )
+    [ set distance-up           OS_sens_BL_up ]
+    
+    if (OS_sens_auv_down != nobody)        and (exploratory-auv? OS_sens_auv_down )
+    [ set distance-down         OS_sens_BL_down ]     
+    
+    ;;------------------------------
+    ;; Identify the boids in the boids' area, using RF
+    set neighbours-RF OS_sens_auvs_RF with [exploratory-auv? self]  
+    ;;------------------------------     
+  ]
+  if chain-alg-state = "chain-nav"
+  [
+    if (OS_sens_auv_front_right != nobody) and ([chain-alg-state] of OS_sens_auv_front_right != "explore")
+    [ set distance-front-right  OS_sens_BL_front_right ]
+    
+    if (OS_sens_auv_front_left != nobody)  and ([chain-alg-state] of OS_sens_auv_front_left != "explore")
+    [ set distance-front-left   OS_sens_BL_front_left ]
+    
+    if (OS_sens_auv_back != nobody)        and ([chain-alg-state] of OS_sens_auv_back != "explore")
+    [ set distance-back         OS_sens_BL_back ]
+    
+    if (OS_sens_auv_up != nobody)          and ([chain-alg-state] of OS_sens_auv_up != "explore")
+    [ set distance-up           OS_sens_BL_up ]
+    
+    if (OS_sens_auv_down != nobody)        and ([chain-alg-state] of OS_sens_auv_down != "explore")
+    [ set distance-down         OS_sens_BL_down ]  
+    
+    ;;------------------------------
+    ;; Identify the boids in the boids' area, using RF
+    set neighbours-RF OS_sens_auvs_RF with [chain-alg-state != "explore"]   
+    ;;------------------------------      
+  ]
+end
+
+
+
+;;====================================================
+;; Calculates the center of the swarm using sensor triangulation - distance but no exact angle.
+;;====================================================
+to calculate-cohesion-sensor-triangulation
+  let noise-threshold OS_bluelight_range * 0.95  ;; thresholding to avoid undesirable influence of sensor noise   
+  
+  print distance-front-right
+  
+  ;; take local copy, since it is going to be modified, to prevent interference with other rules
+  let dist-front-right distance-front-right
+  let dist-front-left  distance-front-left 
+  let dist-back        distance-back       
+  let dist-up          distance-up         
+  let dist-down        distance-down       
+  
+  ;; distance indicators indicate maximum when there is nothing perceived. Thresholding places the center of the swarm on this AUV where that is the case 
+  if dist-front-right > noise-threshold  [  set dist-front-right 0  ]
+  if dist-front-left  > noise-threshold  [  set dist-front-left 0  ]
+  if dist-back        > noise-threshold  [  set dist-back  0  ]
+  if dist-up          > noise-threshold  [  set dist-up    0  ]
+  if dist-down        > noise-threshold  [  set dist-down  0  ]
+    
+    ;; based on what sensor observation and orientation, project onto forward-axis (relative to robot)
+  set cohesion-forward project-forward  60 0 1.0 dist-front-right
+                     + project-forward -60 0 1.0 dist-front-left
+                       
+  if cs-observe-backwards    ;; currently AUVs do not use information about the swarm behind them to calculate center
+  [ set cohesion-forward (cohesion-forward + project-forward 180 0 1.0 dist-back) ]
+  
+  set cohesion-sideways project-sideways 60 0  1.0 dist-front-right 
+                      + project-sideways -60 0 1.0 dist-front-left
+                      
+  set cohesion-up      project-up 0 90  1.0 dist-up 
+                     + project-up 0 -90 1.0 dist-down   
+end
+
+
+
+;;====================================================
+;; Calculates the separation rule using sensor triangulation. Distance within a sensor cone is knwon, but the exact relative location/angle is not. 
+;;====================================================
+to calculate-separation-sensor-triangulation
+  set separation-sideways 0
+  set separation-forward 0
+  set separation-up 0
+  
+  ;; statements that check if AUV distance is closer than threshold.
+  ;; Infringements of AUVs closer than the threshold should result in the AUV moving away. As such, the projected 
+  ;; vector is SUBTRACTED from the avoidance-vector as it is compiled (rather than summed, as elsewhere).
+  if distance-front-right < cs-separation-threshold
+  [ set separation-forward separation-forward - project-forward 60 0 1.0 (cs-separation-threshold - distance-front-right) ] 
+    
+  if distance-front-left  < cs-separation-threshold
+  [ set separation-forward separation-forward - project-forward -60 0 1.0 (cs-separation-threshold - distance-front-left) ]
+  
+  if cs-observe-backwards and (distance-back < cs-separation-threshold)
+  [ set separation-forward separation-forward - project-forward 180 0 1.0 (cs-separation-threshold - distance-back) ]    
+  
+  if distance-front-right < cs-separation-threshold
+  [ set separation-sideways separation-sideways - project-sideways 60 0 1.0 (cs-separation-threshold - distance-front-right) ] 
+ 
+  if distance-front-left  < cs-separation-threshold
+  [ set separation-sideways separation-sideways - project-sideways -60 0 1.0 (cs-separation-threshold - distance-front-left) ]   
+  
+  if distance-up          < cs-separation-threshold
+  [  set separation-up separation-up - project-up 0 90 1.0 (cs-separation-threshold - distance-up) ]
+  
+  if distance-down        < cs-separation-threshold
+  [ set separation-up separation-up - project-up 0 -90 1.0 (cs-separation-threshold - distance-down) ] 
+end
+
+;;====================================================
+;; calculates the alignment rule using global triangulation. 
+;;====================================================
+to calculate-alignment
+  ;; obtain lists of each neighbours velocity in the x, y and z axes (this is in absolute space)
+  let vel-xs [ auv-velocity-x ] of neighbours-RF
+  let vel-ys [ auv-velocity-y ] of neighbours-RF
+  let vel-zs [ auv-velocity-z ] of neighbours-RF
+  
+  ;; get the average velocity (in absolute space). Divide by patchlength because all the other measures are in patches, not meters. 
+  let abs-x median vel-xs / patchlength
+  let abs-y median vel-ys / patchlength
+  let abs-z median vel-zs / patchlength
+  
+  ;; calculate the average velocity relative to the boid
+  set alignment-forward    ((sin heading) * abs-x) + ((cos heading) * abs-y) 
+  set alignment-sideways   ((cos heading) * abs-x) + ((-1 * sin heading) * abs-y)
+  set alignment-up         abs-z
+end
+
+
+;;====================================================
+;; basic trigonometry, will calculate the magnitude of the desired velocity (the speed) in the horrizontal plane
+;;====================================================
+to-report calculate-desired-speed [ collective-forward collective-sideways ]
+  report sqrt ((collective-forward ^ 2) + (collective-sideways ^ 2))
+end
+
+;;====================================================
+;; basic trigonometry, will calculate the heading of the desired heading of the AUV, relative to the direction in which the AUV faces
+;;====================================================
+to-report calculate-desired-heading [ collective-forward collective-sideways ]
+  if collective-forward = 0 and collective-sideways = 0
+  [ report 0 ] ;; default to straight ahead
+  report atan collective-sideways collective-forward
+end
+
+;;====================================================
+;; projects vector of given magnitude, heading and pitch onto the vector along which an AUV points. 
+;; The projection can be scaled by the given scalar. 
+;;   sensor-heading - heading of vector relative to AUV
+;;   sensor-pitch   - pitch of vector relative to AUV
+;;   scale-factor   - the projection is multiplied by this factor
+;;   sensor-reading - the magnitude of the vector
+;;
+;; Note that a heading of 0 points in the same direction of the AUV, and a pitch of 90 points stright upwards. 
+;;====================================================
+to-report project-forward [ sensor-heading sensor-pitch scale-factor sensor-reading ]
+  report (cos sensor-pitch) * (cos sensor-heading) * sensor-reading * scale-factor
+end
+
+;;====================================================
+;; projects vector of given magnitude, heading and pitch onto the vector sideways to where the AUV points (left to right). 
+;; The projection can be scaled by the given scalar. 
+;;   sensor-heading - heading of vector relative to AUV
+;;   sensor-pitch   - pitch of vector relative to AUV
+;;   scale-factor   - the projection is multiplied by this factor
+;;   sensor-reading - the magnitude of the vector
+;;
+;; Note that a heading of 0 points in the same direction of the AUV, and a pitch of 90 points stright upwards. 
+;;====================================================
+to-report project-sideways [ sensor-heading sensor-pitch scale-factor sensor-reading ]
+  report (cos sensor-pitch) * (sin sensor-heading) * sensor-reading * scale-factor
+end
+
+
+;;====================================================
+;; projects vector of given magnitude, heading and pitch onto the vector upwards with respect to where the AUV points. 
+;; The projection can be scaled by the given scalar. 
+;;   sensor-heading - heading of vector relative to AUV
+;;   sensor-pitch   - pitch of vector relative to AUV
+;;   scale-factor   - the projection is multiplied by this factor
+;;   sensor-reading - the magnitude of the vector
+;;
+;; Note that a heading of 0 points in the same direction of the AUV, and a pitch of 90 points stright upwards. 
+;;====================================================
+to-report project-up [ sensor-heading sensor-pitch scale-factor sensor-reading ]
+  report (sin sensor-pitch) * sensor-reading * scale-factor
+end
+
+
+to chain-shoal-derestrict
+  set shoal-restricted false
+end
+
+to chain-shoal-restrict [ res-heading res-deep res-shallow ]
+  set shoal-restricted true
+  set shoal-restricted-heading res-heading
+  set shoal-restricted-depth   res-deep
+  set shoal-restricted-shallow res-shallow
+end
+
+;;====================================================
+;; Called by every AUV to set up. 
+;;====================================================
+to controller-setup-chain-shoal
+  chain-shoal-filter-neighbours
+  
+  set cohesion-sideways 0 ;; positive numbers are right, negative are left
+  set cohesion-forward 0  ;; positive numbers are forward, negative are back
+  set cohesion-up 0       ;; positive numbers are up, negative are down. 
+   
+  set separation-sideways 0
+  set separation-forward 0
+  set separation-up 0 
+   
+  set alignment-sideways 0
+  set alignment-forward 0
+  set alignment-up 0
+      
+  set shoal-restricted false
+      
+  set swarm-in-range true
+  set swarm-in-range-data-collection true
+  
+  
+end

@@ -1,0 +1,63 @@
+;;====================================================
+;;====================================================
+;;
+;; Parameters relating to relay chain formation, maintenance, and shoaling around it. 
+;;
+;;
+;; Shoaling is based on Reynold's boids. Orginal boids implementation found on this webpage: http://www.red3d.com/cwr/boids/
+;;
+;;====================================================
+;;====================================================
+
+globals 
+[
+  hor-sensor-config      ;; set to 6 for 6 horizontal sensors, 4 for 4. 
+  chain-recruitable-threshold  ;; An exploratory shoal AUV must see at least than this many neighbours for it to consider joining the chain when called
+  nlink-relative-depth   ;; the (general) different in depth between two links in the chain
+  nlink-distance         ;; distance new link tries to maintain from hold link. This is largely obsolete now, used for manually constructing
+                         ;; a chain. I have left it in place in case it is needed in the future. 
+  nlink-heading          ;; same as above, but the heading in which a chain is constructed.  
+]
+
+turtles-own 
+[
+  ;;------------------------------------------------------------------
+  ;; These variables are directly related to algorithmic performance. Values may change between AUVs in different stages of the relay chain.
+  cs-observe-backwards
+ 
+  cs-cohesion-weight           ;; how much weight is given to trying to turn into swarm center when calculating boid movement
+  cs-separation-weight         ;; how much weight is given to trying to avoid other boids when calculating boid movement
+  cs-alignment-weight          ;; how much weight is given to tyring to match velocity with other boids when calculating boid movement
+  cs-separation-threshold      ;; in terms of sensor readings, the distance at which this AUV attempts to avoid others around it. 
+
+  cs-speed-scalar              ;; scalar by which speeds determined by boids rules are multipled when converting into percentage of max thrust
+  cs-max-speed                 ;; the maximum speed that a boid can give the OS. This is interpreted as a percentage of maximum thrust   
+  ;;------------------------------------------------------------------
+]
+
+to controller-setup-parameters-chain
+  
+  set hor-sensor-config 4      ;; set to 4 or 3 for Jeff and Lily Mk2 configurations respectively
+  
+  ;;-----------------------------------------
+  ;; these variables concern performance of the chain algorithm itself
+  set chain-recruitable-threshold 3
+  set nlink-relative-depth -0.15
+  ;;-----------------------------------------
+
+  ;;-----------------------------------------
+  ;; these variables concern performance of the chain shoaling algorithm.
+  set cs-observe-backwards true
+  
+  set cs-cohesion-weight   2.0
+  set cs-separation-weight 1.0
+  set cs-alignment-weight  0.0
+  
+  set cs-separation-threshold 0.2       ;; in terms of sensor readings, the distance at which this AUV attempts to avoid others around it. It is a proportion of maximum range
+ 
+  set cs-speed-scalar 100
+  set cs-max-speed    1.0  
+  ;;-----------------------------------------
+
+end    
+    

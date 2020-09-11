@@ -1,0 +1,17 @@
+
+
+to setup-environment
+  show "setting up pool environment."
+  resize-world -20 20 -20 20 -2 20
+  
+end
+
+
+
+to setup-environment-dimensions
+  show "setting up pool environment."
+  ;resize-world -40 40 -40 40 -2 20
+  ;resize-world -30 30 -30 30 -2 20
+  resize-world -25 25 -25 25 -2 20
+  ;resize-world -6 6 -6 6 -2 20 ;; narrow but tall tank
+end

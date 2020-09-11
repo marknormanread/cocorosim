@@ -1,0 +1,363 @@
+;; #################################################################################################
+;; This file implements a physics engine for AUV motion that follows the principles of rigid body dynamics. 
+;;
+;; AUVs (and other bodies that move, should they exist) are capable of translational (location in space)
+;; and rotational (orientation in space) movements. Movements are performed in accordance with velocities. 
+;; Velocities themselves are subject to change under force. Hence, force provided by thrusters, by currents in the
+;; water (should they be active) and drag of the water all contribute to the acceleration acting on a body. 
+;; Accelerations and velocities can be capped. Currently this is the case. There is an argument that if the 
+;; physics model is correctly parameterised, then this should not be necessary (forces of thrust and drag if
+;; correctly parameterised should provide indirect limits on acceleration and velocity) - however this is still
+;; only an abstract model of real world physics and as such these limits have been left in place.
+;; 
+;; #################################################################################################
+
+__includes [
+  "Core-FluidDynamics.nls"    ;; loaded even if not used
+]
+
+globals
+[
+  max-thruster-force     ;; the maximum force that can be applied to the AUV by the thrusters (this is for each thruster).   
+  max-buoyancy-force     ;; the maximum force that can be applied by the buoyancy control
+  
+  kill_engines?          ;; DEBUG. killing the engines permits examination of physics model in ansense of thrust. 
+]
+
+turtles-own
+[
+  ;;------------------------------------------
+  ;; Note that these velocities are in meters per second NOT in patches/second (patches are 10cm in dimension)
+  auv-velocity      ;; the velocity of the AUV (the hypotenuse of the individual components below)
+  auv-velocity-x    ;; component velocities of the AUV
+  auv-velocity-y
+  auv-velocity-z
+  
+  auv-acceleration-x
+  auv-acceleration-y
+  auv-acceleration-z
+  ;;------------------------------------------
+    
+  acceleration  
+    
+  thrust-force-x    ;; component forces of the thrusters acting on the AUV
+  thrust-force-y
+  thrust-force-z
+  
+  drag-force-x      ;; component forces of water drag acting on the AUV
+  drag-force-y
+  drag-force-z
+  drag-torque-yaw   ;; effect of drag on rotational (yaw) velocity
+  
+  auv-velocity-yaw  ;; yaw rotational velocity. This is measured in radians
+  thrust-torque-yaw ;; yaw rotational torque resulting from the thrusters 
+  
+  physics-stop      ;; for debugging, this stops all AUV movement
+]
+
+
+
+;; ###########################################################################
+;; setup specific to rigid body physics
+;; ###########################################################################
+to core-setup-rigid
+  set simulate-currents false
+  set kill_engines? false
+  set current-debug? true
+  ask turtles [ set physics-stop false ] 
+  
+  ;; Buoyancy force calculated based on Lily's properties. Lily weighs 0.44Kg, and can change its volume between 430cm^3 and 450cm^3. 
+  ;; Vertical equilibrium entails that the force of gravity acting on the AUV equals its buoyancy. 
+  ;;
+  ;;   Fnet = mg - pVg ... for a volume of 440cm^3 this equals zero. 
+  ;;
+  ;; for a volume of 450cm^3 this is: 
+  ;;
+  ;;   F = (0.44 * 9.81) - (1000 * 0.00045 * 9.81)  = -0.0981
+  ;;
+  ;; which is rounded to 0.1 (positive force interpreted as upwards AUV movement)
+  set max-buoyancy-force  0.1    ;; based on Lily's weight of 440g, and its volume of 430-450 cm3. 
+  set max-thruster-force  0.005  ;; thruster force has been measured by Tobias in STUTT
+
+
+  set AUV-thruster-distance-center-rotation 0.055 ;; in meters
+  set AUV-thruster-angle-normal-rotation 63      ;; in degrees
+  set AUV-terminal-velocity 0.075                ;; in m/second
+
+  if simulate-currents
+  [ core-current-setup ] 
+end
+  
+
+;; ###########################################################################
+;; Calculates the forces acting on the AUV, both translational and rotational, as a result of 
+;; the thrusters. 
+;; ###########################################################################
+to core-calculate-thrust-rigid  ;; this procedure is executed by AUVs. 
+
+  let  left-thruster-output (item 0 list-of-actuator-volt-values)
+  let right-thruster-output (item 1 list-of-actuator-volt-values)
+  if kill_engines?    ;; DEBUG function. Allows observation of physics model in absence of thrust.
+  [
+    set  left-thruster-output 0
+    set right-thruster-output 0
+  ]
+
+  let  left-thruster-force ( (left-thruster-output / 2.5 ) * max-thruster-force)   ;; scale voltage range onto maximum force thrusters can provide
+  let right-thruster-force ( (right-thruster-output / 2.5 ) * max-thruster-force) 
+ 
+  let compound-thrust left-thruster-force + right-thruster-force
+
+  set thrust-torque-yaw (left-thruster-force - right-thruster-force) * AUV-thruster-distance-center-rotation * (cos AUV-thruster-angle-normal-rotation)  ;; positive torque results in clockwise spin. AUV-thruster-separation is distance of thrusters from centre axis
+
+  ;; desired movement turned into orthogonal forces acting on the AUV
+  set thrust-force-x (sin (heading) * (cos pitch)) * compound-thrust
+  set thrust-force-y (cos (heading) * (cos pitch)) * compound-thrust
+  set thrust-force-z (sin pitch) * compound-thrust
+end
+
+
+;; ###########################################################################
+;; Calculates the force acting on the AUV as a result of water drag. 
+;; Forces calculated oppose AUV movement, and can be added to other forces acting on the AUV when calculating changes in 
+;; AUV velocity. 
+;; ###########################################################################
+to core-calculate-drag-rigid
+
+  let drag-force core-calculate-flow-resistance-rigid auv-velocity ;; this accounts for velocity in all axes
+  ;; The calculations for drag-force-x/y below will return forces with signs consistent with AUV movement. They are multiplied
+  ;; by -1 such that the sign of the forces opposes AUV movement. Hence they can be added to other forces directly when
+  ;; calculating changes in AUV velocity. 
+  set drag-force-x -1 * (sin auv-movement-heading) * (cos auv-movement-pitch) * drag-force
+  set drag-force-y -1 * (cos auv-movement-heading) * (cos auv-movement-pitch) * drag-force
+
+  ;; auv-movement-pitch holds values between -90 and 90, where -90 is down, 90 is up. The calculation of drag-force-z
+  ;; below will return negative forces for AUVs moving downwards. However, drag force should oppose AUV movement. 
+  ;; For this reason, the forces are multiplied by -1. 
+  set drag-force-z -1 * (sin auv-movement-pitch) * drag-force
+  
+  ;; using translational drag equations for rotational velocity. Note that this is not necessarily identical
+  ;; to rotational drag forces.
+  set drag-torque-yaw core-calculate-rotational-resistance auv-velocity-yaw
+
+  ;; drag torque always returned as a positive number. This reflects the direction in which AUV is turning.
+  ;; Hence drag-torque-yaw can be added to other forces directly, it is already set to oppose AUV rotation (unlike translational forces above)
+  if auv-velocity-yaw > 0     
+  [ set drag-torque-yaw drag-torque-yaw * -1 ]  ;; drag set to oppose velocity
+end
+
+
+;; ###########################################################################
+;;
+;; Calculates the vertical force being applied to the AUV as a result of the buoyancy motor. 
+;; The Lily AUV weighs 440g, and can change its volume between 430^3 and 450 cm^3, making the AUV more or less dense.
+;; A volume of 440 is equivalent to the same volume of water as the weight of the AUV. 
+
+;; The change in water density over a few meters (the maximum depth at which the AUV will be used) is negligible. 
+;; Hence, the AUV does not tend to set its buoyancy motor to set a desired depth, rather to exert either an upwards or downwards
+;; force. In the real hardware, a controller with a feedback loop is required to maintain a specific depth. 
+;;
+;; At equilibrium, the downwards force of gravity acting on the AUV is equivalent to the upwards buoyancy force. This is expressed
+;; with the equation:
+;;   F = mg - pVg   ... where g is gravity can be ignored since it applies to both upwards and downwards force in the way manner. 
+;;                  ... where V is volume of AUV, p is the density of water (~1000) and m is the mass of the auv. 
+;; Hence:
+;;   0 = 0.44 * (1000 * 0.00044)   
+;;
+;; When the motor is fully extended such that the volume of the AUV is instead its maximum at 450cm^3, we get the following. 
+;;   F = 0.44 * (1000 * 0.00044) = 0.01N. 
+;;
+;; This, the maximum force the buoyancy motor can exert on the AUV is 0.01N. And this is used in the calculations below. 
+;; 
+;; We assume that a positive force is upwards towards the surface. 
+;; 
+;; ###########################################################################
+to-report core-calculate-buoyancy-rigid [ buoyancy-voltage] 
+  if kill_engines?    ;; mainly for debug purposes.
+  [ report 0 ]
+ 
+  ;; scale the voltage onto the range -1 to 1, and multiply by the maximum force. 
+  let buoyancy-force (buoyancy-voltage / 2.5) * max-buoyancy-force  
+
+  report buoyancy-force
+end
+
+
+;; ###########################################################################
+;;
+;; Applies the movement of the AUV.                                   
+;; 
+;; Physics provided operates on the principles of translational and rotational forces
+;; acting on an object. Forces result in accelerations (which may be subject to upper limits)
+;; which then translate to changes in velocities, which in turn affect AUV displacements
+;; and orientations. 
+;;
+;; The function prevents AUVs from moving through tank walls (netlogo 3d does not currently implement non-toroidal
+;; worlds). 
+;; If an AUV is to try and move through a wall, its forward motion is stopped. It may still turn, however. 
+;; This simulates being able to turn whilst touching the wall, just by pushing into it. 
+;;
+;; Note that at present roll and pitch rotations are not accounted for. The design of Jeff and Lily
+;; entails that it is self-righting. 
+;;
+;; ###########################################################################
+to core-calculate-physics-movement-rigid  
+  set auv-movement-vector         (list 0 0 0)  ;; this list maintains the actual movement of the AUV, after all 
+                                                ;; forces and tank walls have been accounted for
+
+  let current-force-x 0  let current-force-y 0  let current-force-z 0  ;; represent displacement due to currents 
+                                                                       ;; (if currents are being simulated)
+  let current-torque-yaw 0   ;; rotational force due to currents
+  set drag-torque-yaw 0      ;; rotational force due to water resistance
+  
+  core-calculate-thrust-rigid
+  core-calculate-drag-rigid
+  
+  if simulate-currents
+  [
+    let current-forces core-current-translational-forces
+    set current-force-x item 0 current-forces
+    set current-force-y item 1 current-forces
+    set current-force-z item 2 current-forces
+    
+    set current-torque-yaw core-current-rotational-forces
+  ]  
+  let buoyancy-force core-calculate-buoyancy-rigid (item 2 list-of-actuator-volt-values)
+ 
+  ;; the following follow the equation F = mass * acceleration. Acceleration is a result of the forces acting on the auv,
+  ;; and is implicit in the change in the velocity. Note that drag forces have been calculated to oppose AUV movement
+  ;; already. 
+  set auv-acceleration-x ((thrust-force-x + drag-force-x + current-force-x) / AUV-weight)
+  set auv-acceleration-y ((thrust-force-y + drag-force-y + current-force-y) / AUV-weight)
+  set auv-acceleration-z ((thrust-force-z + buoyancy-force + drag-force-z + current-force-z) / AUV-weight)
+  set acceleration sqrt( (auv-acceleration-x ^ 2) + (auv-acceleration-y ^ 2) + (auv-acceleration-z ^ 2))
+
+
+  set auv-velocity-x auv-velocity-x + (auv-acceleration-x * ticklength)
+  set auv-velocity-y auv-velocity-y + (auv-acceleration-y * ticklength)
+  set auv-velocity-z auv-velocity-z + (auv-acceleration-z * ticklength)
+  set auv-velocity sqrt ((auv-velocity-x ^ 2) + (auv-velocity-y ^ 2) + (auv-velocity-z ^ 2))
+  
+  ;; note that the sign of drag-torque-yaw is already set to oppose velocity.
+  ;; Rotational acceleration is defined as torque/mass-moment-of-inertia (I), which is estimated. Terminal rotational velocity is known, and this is used to calibrate
+  ;; rotational drag (elsewhere). Mass moment of inertia dictates speed of acceleration and deceleration. For rotational acceleration, USTUTT has performed experiments that reveal
+  ;; from a standing start Lily can cover 90 degrees in 2.4 seconds. just over 270 by 5, and 360 by 6 seconds. Values of I that deliver this
+  ;; do not give an exactly similar rotational deceleration when thrusters are cut after turning at terminal velocity. USTUTT find that after 8 seconds of 
+  ;; engines cut the AUV makes another rotation, and another half rotation a further 16 seconds thereafter. 
+  ;; The discrepancy is likely because the water around the AUV starts turning as the AUV does. Hence, when the engines are cut, the friction with the water
+  let mass-moment-inertia 0.00050
+  let auv-acceleration-yaw (thrust-torque-yaw + current-torque-yaw + drag-torque-yaw) / mass-moment-inertia ;; torque forces divided by weight gives velocity
+  set auv-velocity-yaw auv-velocity-yaw + (auv-acceleration-yaw * ticklength)  ;; change rotational (yaw) velocity in accordace
+
+  ;; Translational movement is based on velocity, scaled to the ticklength, and also converted to patches/s. Velocities are in m/s, but a patch is only 10cm. Hence, 1m/s should be 10 patches
+  let new-xcor xcor + (auv-velocity-x * ticklength * 10)  ;; these are the proposed new coordinates of the AUV, prior to collision detection w.r.t. tank walls
+  let new-ycor ycor + (auv-velocity-y * ticklength * 10)  
+  let new-zcor zcor + (auv-velocity-z * ticklength * 10)
+
+
+  if NOT physics-stop   ;; for debugging purposes
+  [ 
+    ;; check for breaches in the tank boundaries
+    if NOT (new-xcor <= min-pxcor OR new-xcor >= max-pxcor) ;; if the proposed new coordinate isn't in beach of boundaries
+    [ 
+      set auv-movement-vector replace-item 0 auv-movement-vector ((new-xcor - xcor) * patchlength)  ;; movement-vector is updated, scaled into meters (rather than patch-sized blocks)
+      set xcor new-xcor    
+    ]
+    if NOT (new-ycor <= min-pycor OR new-ycor >= max-pycor)
+    [ 
+      set auv-movement-vector replace-item 1 auv-movement-vector ((new-ycor - ycor) * patchlength)  ;; movement-vector is updated, scaled into meters (rather than patch-sized blocks)
+      set ycor new-ycor
+    ]
+    if NOT (new-zcor <= min-pzcor OR new-zcor >= max-pzcor)
+    [ 
+      set auv-movement-vector replace-item 2 auv-movement-vector ((new-zcor - zcor) * patchlength) ;; movement-vector is updated, scaled into meters (rather than patch-sized blocks)
+      set zcor new-zcor
+    ]
+  ]
+
+  ;; velocity is multiplied scaled by the length of time represented by a tick. 
+  set heading heading + (57.3 * auv-velocity-yaw * ticklength)    ;; 57.3 used to convert from radians to degrees
+  
+  ;; ---------------------------------------------
+  ;; the following calculates actual movemements and orientations of the AUV, used elsewhere. 
+  ;; calculate useful housekeeping functions, such as the heading and pitch in which the AUV is moving (not necessarily facing)
+  ifelse (item 0 auv-movement-vector) = 0 and (item 1 auv-movement-vector) = 0
+  [ set auv-movement-heading heading ]    ;; default case if there is no movement. 
+  [ set auv-movement-heading atan (item 0 auv-movement-vector) (item 1 auv-movement-vector) ]
+  
+  ifelse (item 0 auv-movement-vector) = 0 and (item 1 auv-movement-vector) = 0 and (item 2 auv-movement-vector) = 0
+  [ set auv-movement-pitch 0 ]      ;; default case if there is no movement
+  [ 
+    set auv-movement-pitch atan (item 2 auv-movement-vector) (sqrt ((item 0 auv-movement-vector) ^ 2) + ((item 1 auv-movement-vector) ^ 2)) 
+    if auv-movement-pitch < 360 and auv-movement-pitch > 90   ;; above use of atan returns: 270 <= value <= 90. We want values between -90 and 90. 
+    [ set auv-movement-pitch auv-movement-pitch - 360 ] 
+  ]
+
+  ;; velocity calculated from how far the AUV has moved, and the time in which that movement was made. Note that velocity is in meters/second (not patches/second).
+  let auv-displacement sqrt( ((item 0 auv-movement-vector) ^ 2) + ((item 1 auv-movement-vector) ^ 2) + ((item 2 auv-movement-vector) ^ 2) )
+  ifelse auv-displacement = 0
+  [ ;; if the AUV is not moving, then the unit vector assumed to be direction in which AUV points (heading and pitch)
+    set auv-movement-unit-vector (list (sin heading * cos pitch) (cos heading * cos pitch) (sin pitch))
+  ]   
+  [ set auv-movement-unit-vector ( list ((item 0 auv-movement-vector) / auv-displacement)     ;; X component
+                                        ((item 1 auv-movement-vector) / auv-displacement)     ;; Y component
+                                        ((item 2 auv-movement-vector) / auv-displacement) )   ;; Z component
+  ]
+  set auv-velocity auv-displacement / ticklength   ;; velocity must be in meters per second. This accounts for ticklengths, displacement is movement in a tick
+  ;; --------------------------------------------- 
+end
+
+
+
+;; ###########################################################################
+;; #                                                                         
+;; #  Calculates the drag-resistance of an AUV through water. This has been calibrated to Lily. 
+;; #  Equation used is as follows:
+;; #  Fd = 0.5* p * v*v * Cd * A
+;; #   where Fd is the force of drag
+;; #   p is the density of the fluid
+;; #   v is the speed of the object relative to fluid
+;; #   Cd is the drag co-efficient (dependent on the 'roughness' of material)
+;; #   A is the reference area, the cross section perpendicular to the direction of motion. 
+;; #    (all acquired from wikipedia, search for Drag (physics)
+;; #
+;; #  input: velocity of the AUV                                             #
+;; #  output: flow-resistance. Note that this is always positive, since velocity is squared.                                      
+;; #                                                                         #
+;; ###########################################################################
+to-report core-calculate-flow-resistance-rigid [velocity]  
+  let flow-resistance 0    ; in Newtons 
+
+  ;; Flow resistance of Lily is not known exactly. It is calculated based on empirical estimates made by Tobias in Stuttgart. Terminal AUV velocity is ~7.5cm/s. 
+  ;; Time to cover 10cm from a standing start is ~3.3 seconds. And the
+  ;; thruster force is ~0.005 newtons per thruster. Given these figures, value AxCd (cross section * drag co-efficient) can be calculated, 
+  ;; since it must equal thruster force when the AUV is at terminal velocity. It can be calculated, in Netlogo, using the following. 
+  ;;
+  ; let ACd 0.5 * density-water * (2 * 2 * max-thruster-force) / (1000 * (AUV-terminal-velocity ^ 2))
+  ;;
+  ;; This gives a value of 
+  let ACd 1.777777777
+  set flow-resistance ( velocity * velocity * ACd)
+   
+  report flow-resistance  
+end
+
+
+to-report core-calculate-rotational-resistance [rot-velocity]
+  let rot-resistance 0  ;; in newtons
+
+  ;; There is very little information available concerning calculating the rotational drag of an object through
+  ;; water. So this is a best guess... Calculations to determine the thrust provided by thrusters have been performed
+  ;; on the basis of maximum acceleration and maximum velocities. Given the terminal rotational velocity, 
+  ;; the equations here can be calibrated. Terminal rotational velocity has not been measured empirically, and the current
+  ;; values for this equation represent a best guess based on this terminal velocity being 6 RPM - so a full turn in 10 seconds. 
+  ;;
+  ;; skin resistance will increase with the square of the velocity at which the skin moves through the water.
+  ;; Increased area will increase the resistance, and there will be some frictional co-efficient relating to 
+  ;; how 'rough' or 'sticky' the surface is with respect to water. 
+
+   set rot-resistance (( rot-velocity ^ 2) * 0.000114)
+  
+  report rot-resistance
+end
+

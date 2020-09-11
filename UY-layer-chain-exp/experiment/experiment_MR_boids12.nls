@@ -1,0 +1,94 @@
+; Experimentation user file
+ 
+;; files included that are specific to this experiment.  
+__includes[
+  "../controller/UY_boids12.nls"
+  "../hardware/RobotModel_12Sensors.nls"
+  "../environment/pool.nls"
+  ;"../environment/reptile_tank.nls"  
+]
+
+ 
+globals [  
+  water-level 
+  make-ground-terrain? 
+  make-borders? 
+  make-watersurface? 
+  stop-on-obstacle-collisions?
+  print-AUV-collisions?
+  confinement-behaviour?
+]
+
+
+to experiment-setup ; this is called by the "setup" main procedure 
+  setup-environment-dimensions
+  
+  set confinement-behaviour? false ; if TRUE, the AUVs try to stay inside a certain distance to the (nearest) basestation (= vitual fence).
+  set stop-on-obstacle-collisions? false ; if TRUE, the AUV stops when it is located on a borderpatch or a groundpatch
+  set print-AUV-collisions? true ; if TRUE, the simulation prints the turtle identifier and "collision" string in the command center if two AUVs are located on the same patch
+  
+  set make-ground-terrain? true
+  set make-borders? true
+  set make-watersurface? false
+  set water-level 20 ; z-coordinate of the water surface above the bottom;  
+  core-setup-world ; the world (ground, water, water surface, borders) is created; must exist after set waterlevel & number-auvs
+  core-setup-shapes ; the shapes of the different AUVs is loaded
+  core-setup-physics ; physical parameters of the world and the AUVs are loaded
+  
+  experiment-setup-robots ; robots are set up and created
+  set number-of-all-robots (count AUVs-DUMMY) ;; a convenience variable that holds the total number of AUV robot
+  
+      ;; set up the camera  
+  setxyz -0 -10 25 ; sets the position of camera ; user
+  face patch 0 2 0  ; sets the heading of camera ; user
+  zoom -60 ; sets the zoom of camera ; user
+end
+
+
+to experiment-setup-robots
+  
+  repeat 2 ; this number defines the number of a certain AUV type that should be created
+  [
+    ; DUMMY AUVs are created and placed on random water patches at a certain depth in the upper right corner of the tank
+    robotmodel-create-AUV12 one-of patches with 
+      [water? and (count turtles-here = 0)
+        and pzcor = 5 ;(pzcor < 10) and (pzcor > 0) 
+        and (pxcor > -5) and (pxcor < 5)
+        and (pycor > -5) and (pycor < 5)
+      ] 
+  ]  
+  
+  ask AUVs-DUMMY [HAL-setup] ; the HAL is initialized
+  ask AUVs-DUMMY [Controller-setup] ; the controller is initialized
+
+  ;robotmodel-create-basestation-DUMMY patch 0 0 water-level ; 1 basestation DUMMY is created in the middle on the water surface; as of now it is set to (is-robot? = false) because it does not have any sensors or actuators yet and it does not have the same sensors as the AUVs
+
+  set all-AUVs (turtles with [is-AUV?]) ; all the robots (= different AUV types + base stations) are put into an agentset; used for interaction with agents 
+  set all-robots (turtles with [is-AUV? or is-base?])
+  set all-base-stations (turtles with [is-base?])
+end
+
+
+to experiment-startup ; function has to exist; called once the go button is pressed, after the arena and the robots are created
+  
+  if (confinement-behaviour?) ; if the confinement-behaviour is set to TRUE in the experiment.nls, set some things for evaluation 
+    [
+    ask water-surfaces with [(distancexy 0 0) > (0.7 * 30)] [set color yellow]
+    ask water-surfaces with [(distancexy 0 0) > 30] [set color white]
+    reset-perspective
+    ]
+   
+end
+
+
+to experiment-go-first ; function has to exist; before all turtles and patches have acted
+end 
+
+
+to experiment-go-last ; function has to exist; after all turtles and patches have acted 
+end 
+
+
+
+to experiment-update-world ; function has to exist; here all the things that happen each tick in the environment should be performed
+end

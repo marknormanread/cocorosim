@@ -1,0 +1,401 @@
+to Controller-setup
+
+; after the creation of the distance-to-basestation sensor, the internal "previous tick" integer value of the sensor has to be set.
+
+set list-of-internal-values-beeclust lput 0 list-of-internal-values-beeclust    ;item 0 = turning counter
+set list-of-internal-values-beeclust lput 0 list-of-internal-values-beeclust    ;item 1 = turning direction; -1=LEFT 1=RIGHT 
+set list-of-internal-values-beeclust lput 0 list-of-internal-values-beeclust    ;item 2 = waiting counter
+set list-of-internal-values-beeclust lput 0 list-of-internal-values-beeclust    ;item 3 = state
+
+end
+
+
+to Controller-update ; empty controller with the following parts: 
+                     ; - performing the standard forward motion (both thrusters 75% forward)
+                     ; - trying to avoid near borders
+                     ; - trying to avoid AUV collisions
+                     ; - using a correlated random walk
+                     ; - keeping the AUV below a certain depth
+                     ; - keeping the AUVs above the ground
+  
+ 
+
+  ; all sensor information in integers                   
+  
+  ;passive-sensor for robot detection
+  let passive-distance-front item 0 list-of-sensor-integer-values
+  let passive-distance-right item 1 list-of-sensor-integer-values
+  let passive-distance-back item 2 list-of-sensor-integer-values
+  let passive-distance-left item 3 list-of-sensor-integer-values
+  let passive-distance-up item 4 list-of-sensor-integer-values  
+  let passive-distance-down item 5 list-of-sensor-integer-values  
+  
+  ;acrive sensors for wall detection
+  let active-distance-front item 6 list-of-sensor-integer-values  
+  let active-distance-right item 7 list-of-sensor-integer-values  
+  let active-distance-back item 8 list-of-sensor-integer-values
+  let active-distance-left item 9 list-of-sensor-integer-values  
+  
+  let distance-to-ground item 10 list-of-sensor-integer-values
+  let depth-pressure item 11 list-of-sensor-integer-values ; IMPORTANT: As of now, "depth" is the distance to the water surface (=pressure), so a higher value really means a deeper AUV.
+  let number-of-near-robots item 12 list-of-sensor-integer-values
+ 
+  let electric-field-sensor item 14 list-of-sensor-integer-values
+  
+  
+  ;set local variables
+  let turning-counter item 0 list-of-internal-values-beeclust 
+  let turning-direction item 1 list-of-internal-values-beeclust  
+  let state item 3 list-of-internal-values-beeclust
+  let waiting-counter item 2 list-of-internal-values-beeclust
+  
+  let sensor-range 100 ;sensor-range describes range for active sensing (wall detection)
+  let robot-detection-range 150
+  ;let senoer-range-close 200
+  
+;wall avoidance-----------------------------------------------
+
+ifelse (turning-counter <= 0) and (waiting-counter <= 0)                       ;IF AUV is NOT busy in turning
+[                                                                              ;IF no obstacles in sight OR no robots in sight
+  ifelse ((active-distance-front < sensor-range) and (active-distance-right < sensor-range) and (active-distance-left < sensor-range)) and (passive-distance-front < robot-detection-range)   
+  [
+    set color yellow
+    controller-standard-forward-motion                                         ;MOVE
+    
+    if (depth-pressure < 200)  [controller-buoyancy-sink] ;; (note that depth-pressure is the distance from the water surface) AUV is getting too high (or pressure too low) -> AUV should sink
+    if (distance-to-ground > 10) [controller-buoyancy-rise] ;; AUV is getting too close to the ground -> AUV should rise                                                                                          
+  ]
+  [
+    ;IF AUV DOES SEE AN OBSTACLES, THEN STOP
+    set color green
+    
+    controller-actuator-left-stop                ;stop the engines
+    controller-actuator-right-stop
+    controller-buoyancy-stay
+    set turning-counter 4                        ;turningcounter is set
+    
+    ifelse (active-distance-left < active-distance-right)  ;IF obstacle is closer on the right side
+    [
+      set turning-direction -1                             ;THEN turn left (-1 = left)
+    ]
+    [
+      set turning-direction 1                              ;ELSE turn right (1 = right)
+    ]
+    set state 1                                            ;switch to state 1 (to waitingtime calculation)
+  ]
+  
+]
+[                                                          ;IF AUV is busy in turning
+  
+  if turning-direction = -1                                ; IF AUV should turn left
+  [turn-left]                                              ; make a left turn
+  if turning-direction = 1                                 ; IF AUV should turn right     
+  [turn-right]                                             ; make a right turn
+  
+  set turning-counter turning-counter - 1                  
+]
+
+;STATEMACHINE------------------------------------------------------------------------------------------------
+
+if state = 0;normal movement-------------------------------------------------------------------------------------------
+[
+  
+]
+
+if state = 1;calculating waiting-time--------------------------------------------------------------------------
+[
+  ifelse  (passive-distance-front > 0)                  ;IF AUV sees an other AUV in front
+  [
+    set waiting-counter (electric-field-sensor * 8)     ;THEN "calculate" a waiting time
+    set state 2                                         ; and switch to next state
+  ]
+  [
+    set state 0                                         ;ELSE reset to normal movement                       
+  ]
+]
+
+if state = 2;waiting state-----------------------------------------------------------------------------------------------
+[
+  set color red
+  ifelse waiting-counter > 0                      ;IF AUV is busy in waiting
+  [  
+     controller-actuator-left-stop                ;stop the engines
+     controller-actuator-right-stop
+     controller-buoyancy-stay
+     set waiting-counter waiting-counter - 1      ;reduce waiting-counter by one
+  ] 
+  [
+     set state 3                                  ;ELSE switch to state 3
+  ]
+]
+
+
+if state = 3;reset controller-----------------------------------------------------------------------------------------------
+[
+  set color white
+  set state 0 
+]
+
+
+
+
+
+
+
+
+;  if state = 0 ;move forward-----------------------------------------------------------------------------------
+;  [
+;    set color yellow                              ;AUV shall be yellow
+;    controller-standard-forward-motion            ;make forward movement
+;    
+;    if (depth-pressure < 200)  [controller-buoyancy-sink] ;; (note that depth-pressure is the distance from the water surface) AUV is getting too high (or pressure too low) -> AUV should sink
+;   
+;    if (distance-to-ground > 10) [controller-buoyancy-rise] ;; AUV is getting too close to the ground -> AUV should rise
+;    
+;    ;print "state 0"
+;  ]
+;  
+;  if state = 1 ;stop-------------------------------------------------------------------------------------------
+;  [
+;    set color red
+;    
+;    controller-actuator-left-stop                ;stop the engines
+;    controller-actuator-right-stop
+;    controller-buoyancy-stay
+;    
+;    set state 2                                  ;proceed with electical meassurement
+;    ;print "state 1"
+;  ]
+;  
+;   if state = 2; meassure and wait--------------------------------------------------------------------------------------
+;  [
+;    
+;    ifelse waiting-counter > 0
+;    [
+;     set waiting-counter waiting-counter - 1
+;     
+;    ]
+;    [
+;      set turning-counter 4
+;      set state 3
+;    ] 
+;  ]
+;  
+;  if state = 3;turn----------------------------------------------------------------------------------------------------
+;  [
+;    set color green
+;    ifelse turning-counter > 0                  ;IF you are currently busy in turning
+;    [
+;      if turning-direction = 1                  ;IF you have chosen to turn right (turning-direction = 1)
+;      [
+;        turn-right                              ;THEN make a right turn
+;        ;print "right"
+;      ]                              
+;      if turning-direction = -1
+;      [
+;        turn-left                               ;ELSE make a left turn
+;        ;print "left"                               
+;      ]                               
+;      
+;      set turning-counter turning-counter - 1   ;ruduce turningcounter by 1 
+;      ;print turning-counter
+;    ]
+;    [
+;      set turning-direction 0 
+;      set state 0                               ;IF you are NOT busy in turning reset your state to 0 
+;      ;print "reset" 
+;    ]
+;   ;print "state 3" 
+;  ]
+  
+  
+  
+  ;write local variables back to AUV's own list-of-integer-values
+  set list-of-internal-values-beeclust replace-item 0 list-of-internal-values-beeclust turning-counter
+  set list-of-internal-values-beeclust replace-item 1 list-of-internal-values-beeclust turning-direction
+  set list-of-internal-values-beeclust replace-item 3 list-of-internal-values-beeclust state
+  set list-of-internal-values-beeclust replace-item 2 list-of-internal-values-beeclust waiting-counter
+  
+  ;set label waiting-counter
+      
+
+
+  ;For debugging only------------------------------------------------------------------------
+  
+  ;print word "state: "  state
+  ;print (list-of-internal-values-beeclust)
+  
+  
+;  if active-distance-front > 0 or active-distance-left > 0 or active-distance-right > 0 or active-distance-back > 0 
+; [
+;    print "***************************"
+;    print word "front:" active-distance-front 
+;    print word "left:" active-distance-left
+;    print word "right:" active-distance-right
+;    print word "back:" active-distance-back
+;  
+;    print word "turn-counter: " turning-counter
+;  ]
+  ;print turning-direction
+  
+  ;print electric-field-sensor
+  
+end
+
+
+
+
+
+
+
+;DIFFERENT MOVEMENTS*****************************************************************************************************************************************************
+
+to turn-right
+  controller-actuator-right-stop
+  controller-actuator-left-full
+end
+
+to turn-left
+  controller-actuator-left-stop
+  controller-actuator-right-full
+end
+
+
+
+
+to controller-standard-forward-motion
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 96) ; ~75% forward speed for left thruster
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 96) ; ~75% forward speed for right thruster
+end
+
+to controller-standard-left
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 96) ; ~75% forward speed for left thruster
+end
+
+to controller-standard-right
+   set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 96) ; ~75% forward speed for right thruster
+end
+
+
+
+to controller-actuator-left-increase
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values (item 0 list-of-actuator-integer-values + 16)) ; increase forward speed for left thruster  
+end
+
+
+to controller-actuator-right-increase
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values (item 1 list-of-actuator-integer-values + 16)) ; increase forward speed for right thruster    
+end
+
+
+to controller-actuator-left-decrease
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values (item 0 list-of-actuator-integer-values - 16)) ; increase forward speed for left thruster  
+end
+
+
+to controller-actuator-right-decrease
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values (item 1 list-of-actuator-integer-values - 16)) ; increase forward speed for right thruster    
+end
+
+to controller-actuator-left-full  
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 127) ; set forward speed for left thruster to 0    
+end
+
+to controller-actuator-right-full 
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 127) ; set forward speed for left thruster to 0    
+end
+
+to controller-actuator-left-stop  
+  set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 0) ; set forward speed for left thruster to 0    
+end
+
+
+to controller-actuator-right-stop
+  set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 0) ; set forward speed for right thruster to 0
+end
+
+
+to controller-buoyancy-sink
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values -64) ; set buoyancy to sink at half speed
+end
+
+
+to controller-buoyancy-rise
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values 64) ; set buoyancy to rise at half speed
+end
+
+
+to controller-buoyancy-stay
+  set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values 0) ; set buoyancy to remain at current depth
+end
+
+
+;this procedure was thought to make video export, but does not work! :( .... because of path-problems! 
+;to export-movie
+;let timestep ticks
+;let timercount "00000"
+;
+;    ifelse (timestep >= 0 and timestep < 10)
+;      [set timercount word "0000" timestep]
+;      [
+;        ifelse (timestep >= 10 and timestep < 100)
+;          [set timercount word "000" timestep]
+;          [
+;            ifelse (timestep >= 100 and timestep < 1000)
+;              [set timercount word "00" timestep]
+;              [
+;                ifelse (timestep >= 1000 and timestep < 10000)
+;                [set timercount word "0" timestep]
+;                [
+;                  set timercount timestep
+;                ]
+;              ]
+;          ]
+;      ]
+;    ;print timercount
+;    set-current-directory "../../../../Desktop/mymov"
+;    export-view word "frame_" word timercount ".png"
+;
+;end
+
+
+;-----------------------------------------------------------------CODE BACKUP----------------------------------------------------------------
+;-----------------------------------------------------------------CODE BACKUP----------------------------------------------------------------
+;-----------------------------------------------------------------CODE BACKUP----------------------------------------------------------------
+;controller-standard-forward-motion ; 75% forward motion
+;  
+; 
+;  ; border avoidance; leads to a counter-clockwise rotation of the AUVs after a while
+;  ifelse (active-distance-front > 0) ; when there is an obstacle/wall inside the frontal active sensor range
+;    [ 
+;    ifelse (active-distance-front > 150)
+;      [ controller-actuator-left-stop] ; if the border is *very* close always turn soft. 
+;      [ controller-actuator-left-decrease controller-actuator-left-decrease] ; if the border is not as close, turn soft left; 
+;    ]  
+;    
+;    [ ; when AUV observes nothing in front
+;    ifelse ((active-distance-right > 0) and (active-distance-left > 0)) 
+;       [ controller-actuator-left-stop] ; if there are close borders to both sides (e.g. corners), then make a hard left turn
+;       [ ; if only one side sensor perceives an object
+;       ifelse (active-distance-right > 0) ; if AUV observes object to right
+;         [controller-actuator-left-decrease] ; soft turn left
+;         [ ; if no object to the right
+;         ifelse (active-distance-left > 0) ; if AUV observes object to left
+;           [controller-actuator-right-decrease] ; soft turn right
+;           [ ; if no objects were perceived
+;           ; AUV collision avoidance
+;           ifelse (passive-distance-front > 150) ; when there is a very near AUV in front
+;             [controller-actuator-left-stop controller-actuator-right-stop controller-actuator-left-increase] ; stop thrusters when there is another AUV very close in front; increase left thruster to make a slow right turn
+;             [ ; if there is not AUV near in front
+;             ifelse (random-float 1.0 < 0.5) ; randomized soft turn; "correlated random walk"
+;               [controller-actuator-left-increase] ; turn either right (50% chance)
+;               [controller-actuator-right-increase] ; or left (50% chance)
+;             ]
+;           ]       
+;         ]
+;       ]     
+;     ]   
+;  ; after all avoidance behaviours
+;  ; keep a certain depth
+;  if (depth-pressure < 125)   [controller-buoyancy-sink] ;; (note that depth-pressure is the distance from the water surface) AUV is getting too high (or pressure too low) -> AUV should sink
+;  if (distance-to-ground > 0) [controller-buoyancy-rise] ;; AUV is getting too close to the ground -> AUV should rise

@@ -1,0 +1,167 @@
+;;=============================================
+;; Experiment that handles the profiling of a relay chain algorithm
+;;=============================================
+
+__includes[
+  "../controller/UY_chain.nls"    ;; currently only works with this particular algorithm
+  "../environment/pool.nls"
+]
+
+globals [  
+  water-level 
+  make-ground-terrain? 
+  make-borders? 
+  make-watersurface? 
+  stop-on-obstacle-collisions?
+  print-AUV-collisions?
+  confinement-behaviour?
+  
+  experiment-number-AUVs  ;; the total number of AUVs that will be included in the experiment. This does NOT dictate how many are in the chain/shoal  
+  
+  EO-output-file  ;; string holds the location to which experimental results data file is to be written
+  
+  ;; 'EO' for experimental output
+  EO-lost-links           ;; cumulative count of the number of AUVs that get lost (regardless of how long they are lost for)
+                          ;; 'lost' here means lost line of sight, not necessarily RF range. We ignore RF for now, because you 
+                          ;; can't triangulate with it
+  EO-cumulative-global-lost-time  ;; total time spent by all AUVs being lost
+  EO-global-broken-time   ;; the time that the chain, as an entity, is broken for - number of AUVs that are lost ignored here
+  
+  exp-lost-links          ;; agent-set describing which AUVs are currently lost
+  exp-prev-lost-links     ;; agent-set of AUVs that were PREVIOUSLY lost, use set difference to calculate if any new auvs were lost
+]
+
+
+to experiment-setup       ;; this is called by the "setup" main procedure, can be used for initialising parameters
+  setup-environment-dimensions
+  
+  set experiment-number-AUVs 10
+    
+  set confinement-behaviour? false ; if TRUE, the AUVs try to stay inside a certain distance to the (nearest) basestation (= vitual fence).
+  set stop-on-obstacle-collisions? false ; if TRUE, the AUV stops when it is located on a borderpatch or a groundpatch
+  set print-AUV-collisions? true ; if TRUE, the simulation prints the turtle identifier and "collision" string in the command center if two AUVs are located on the same patch
+  
+  set make-ground-terrain? false
+  set make-borders? true
+  set make-watersurface? false
+  set water-level 20 ; z-coordinate of the water surface above the bottom;  
+  core-setup-world ; the world (ground, water, water surface, borders) is created; must exist after set waterlevel & number-auvs
+  core-setup-physics ; physical parameters of the world and the AUVs are loaded
+  
+  experiment-setup-robots ; robots are set up and created
+  ask turtles [ set physics-stop false ] 
+  set number-of-all-robots (count AUVs-DUMMY) ;; a convenience variable that holds the total number of AUV robot
+  
+      ;; set up the camera  
+  setxyz -0 -10 25 ; sets the position of camera ; user
+  face patch 0 2 0  ; sets the heading of camera ; user
+  zoom -60 ; sets the zoom of camera ; user
+  
+  set OS_show_LEDs 0  
+  
+  set exp-lost-links n-of 0 turtles       ;; no standard notation for empty agent-set, use this instead 
+end
+
+
+;;=============================================
+;; Sets up the robots in the environment, initialises their OS and controllers, and sets up the experiment.
+;;=============================================
+to experiment-setup-robots  
+  show "experiment-setup-robots"
+  set rigid-body-physics true    
+  
+  repeat experiment-number-AUVs ; this number defines the number of a certain AUV type that should be created
+  [
+    robotmodel-create-AUV-Lily one-of patches with 
+      [water? and (count AUVs-DUMMY-here) + (count AUVs-Lily-here) + (count AUVs-Jeff-here) = 0
+        and (pzcor = 10)
+        and (pxcor > -3) and (pxcor < 3)
+        and (pycor > -3) and (pycor < 3)
+      ] 
+  ]
+  
+  ask AUVs-Lily
+  [ 
+    controller-setup
+  ]
+
+  set all-AUVs (turtle-set AUVs-DUMMY AUVs-Lily AUVs-Jeff) ; all the robots (= different AUV types + base stations) are put into an agentset; used for interaction with agents 
+  set all-base-stations (turtle-set basestations-DUMMY basestations-DUMMY)
+  set all-robots (turtle-set all-AUVs all-base-stations)  
+end
+
+
+
+
+to experiment-startup     ;; function has to exist; called once only, after the go button is pressed and after the arena and the robots are created
+  start-chain                    ;; pre-form the beginning of the chain
+end  
+  
+to experiment-go-first ; function has to exist; handle experimental observation before all turtles and patches have acted
+end 
+
+
+to experiment-go-last ; function has to exist; handle experimental observation after all turtles and patches have acted 
+  let chain-auvs all-AUVs with [chain-alg-state = "chain"]
+  
+  ;;--------------------
+  ;; cumulative count of the number of AUVs that have lost line of sight contact with links either side of them. 
+  ;; only newly lost AUVs count, not interested in AUVs that were already lost at this stage
+  set exp-lost-links chain-auvs with [ chain-link-lost = true ]  ;; create agent-set of lost links
+  let new-lost count exp-lost-links with [not member? self exp-prev-lost-links] ;; set difference, which AUVs are newly lost
+  set EO-lost-links EO-lost-links + new-lost   ;; add to the cumulative count
+  set exp-prev-lost-links exp-lost-links       ;; store for the next iteration
+  ;;--------------------
+  
+  ;;--------------------
+  ;; calculations concerning time that AUVs are lost, and the total time that the chain is broken for. 
+  ;; One measure is the total cumulative time that AUVs spent lost in the chain. This is the product of the number of AUVs that are lost, and 
+  ;; the tick length.
+  ;; The other measure is simply how long the chain is broken for, regardless of how many AUVs are lost. 
+  let new-lost-time (count exp-lost-links) * ticklength
+  set EO-cumulative-global-lost-time EO-cumulative-global-lost-time + new-lost-time
+  if (count exp-lost-links != 0)      ;; calculate total time that the chain is broken for
+  [ set EO-global-broken-time EO-global-broken-time + ticklength ]
+  ;;--------------------
+end 
+
+
+;;=========================================================
+;; Procedure takes care of writing data to the file system once the experiment has completed. 
+;; It is called from within behaviorspace. To use it in the gui, you need to create a button and manually press it.
+;;=========================================================
+to experiment-teardown
+  if EO-output-file = 0                         ;; safety, in case the output file name has not been set. 
+  [  set EO-output-file "default-output-file" ]
+  if file-exists? EO-output-file
+    [ file-delete EO-output-file ]
+  file-open EO-output-file
+   ;; print out columns, what the data means. 
+  file-print "lost-links cumulative-global-lost-time chain-broken-proportion-time"
+
+   ;; print out the data itself. 
+  let output (word EO-lost-links " " 
+                   EO-cumulative-global-lost-time " "
+                   (EO-global-broken-time / time) " "
+                   "\n"
+             )
+  file-print output
+
+  file-close
+end
+
+
+;;=========================================================
+;; Utility function to calculate the inter-quartile range of a data set. 'values' must be a list. Returns a single value.
+;;=========================================================
+to-report IRQ[ values ]
+  set values sort values
+  let samples length values
+  report item ((round (0.75 * samples)) - 1 ) values - item ((round (0.25 * samples)) - 1) values
+end
+
+
+to experiment-update-world ; function has to exist; here all the things that happen each tick in the environment should be performed
+end
+
+

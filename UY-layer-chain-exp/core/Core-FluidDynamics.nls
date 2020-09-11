@@ -1,0 +1,965 @@
+;;===========================================
+;; This module contains code implementing currents and turbulence in the water
+;;
+;; Note that this module is *incompatible* with the 'rails' physics engine. 
+;;===========================================
+
+;; this is part of the currents implementation
+breed [current-arrows]
+breed [current-source-sinks]
+breed [floaters]
+;; ----end currents implementation----
+
+
+globals
+[   
+  ;; ---- the following pertain to water currents ----
+  simulate-currents   ; boolean flag - whether or not to simulate underwater currents
+  
+  middle-patches       ; patches that are bordered by water on all sides
+       ; these are patches that share one 6-neighbour with a tank boundary
+  left-patches         ; patches that boarder with the left wall (x-axis)
+  right-patches        ; patches that boarder with the right wall (x-axis)
+  near-patches         ; patches that boarder with the near wall (y-axis)
+  far-patches          ; patches that boarder with the far wall (y-axis)
+  top-patches          ; patches that boarder with the surface (z-axis)
+  bottom-patches       ; patches that boarder with the sea bed (z-axis)
+       ; these are patches that share two 6-neighbours with a tank boundary
+  left-near-patches
+  left-far-patches
+  left-bottom-patches
+  left-top-patches
+  right-near-patches
+  right-far-patches
+  right-bottom-patches
+  right-top-patches
+  far-bottom-patches
+  far-top-patches
+  near-bottom-patches
+  near-top-patches
+       ; these are patches that are the nieghbours of the corners of the tank
+  left-near-top-patch
+  left-far-top-patch
+  left-near-bottom-patch
+  left-far-bottom-patch
+  right-near-top-patch
+  right-far-top-patch
+  right-near-bottom-patch
+  right-far-bottom-patch    
+  
+  
+  current-diffusion-rate     ;; values between 0 and 1. Represents proportion of current that is diffused (as opposed to staying where it is)
+  current-decay-rate         ;; values between 0 and 1. 1 = no decay. 
+  current-sink-spawn-probability       ;; the porbability that a sink will spawn in a patch in a second
+  current-sink-max-magnitude          ;; the maximum current force that a source can emit into each patch at its peak intensity
+  current-source-sink-duration         ;; the length of time for which a current sink will remain active for
+  current-debug?             ;; when 'true', offers visual indication of currents. 
+  ;; ---- end currents ----
+]
+
+patches-own
+[ 
+    ;; the following pertain to water currents
+  neighbourhood     ; this is the non-wrapping neighbourhood, stored in each patch for computational expense savings. 
+  current-x         ; current vector of current in x, y and z planes. 
+  current-y
+  current-z
+  old-current-x     ; to perform atomic current updates we need copy of previous currents. 
+  old-current-y
+  old-current-z
+  ;current-diffusion-rate   ; set between 0 and 1. 1 represents fastest diffusion of current. 0 represents slowest, no current diffusion. 
+                           ; this variable sets the proportion of current that can be modified (and influences others) in a single tick.
+]
+
+current-source-sinks-own ;; global variables relating to the turtles that represent current sources (hot spots) and sinks (cold spots)
+[
+  degree              ;; goes from 0 to 180. 
+  degree-increment    ;;
+  
+  magnitude-increment
+  magnitude-max
+  maximum-passed
+  polarisation        ; 1 = source of current; -1 = sink.  
+]
+
+floaters-own
+[
+  velocity-x
+  velocity-y
+  velocity-z 
+  rotational-velocity
+]
+
+;; ###########################################################################
+;; Setting up rates and constants pertaining to currents
+;; ###########################################################################
+to core-current-setup
+  set current-diffusion-rate 0.60
+  set current-decay-rate 0.65
+  set current-sink-spawn-probability 0.0015
+  set current-sink-max-magnitude 0.003
+  set current-source-sink-duration 25
+  
+  core-diffuse-currents-setup  ;; set up variables containing particular types of patches (e.g. walls and corners), used in diffusion.
+    
+  if current-debug?
+  [
+    ask patches with [water? = true]
+    [
+      sprout-current-arrows 1
+      [
+        set color white
+        ifelse current-x + current-y = 0
+        [ set heading 0 ]
+        [ set heading atan current-x current-y ]
+        set size 0
+      ]
+    ]
+;    create-floaters 2  ;; floaters can be thought of as leaves, they do not produce thrust but are reactive to currents. 
+;    [
+;      let p one-of patches with [water? = true]
+;      
+;      set xcor [pxcor] of p
+;      set ycor [pycor] of p
+;      set zcor [pzcor] of p
+;      set size 1
+;      set color green
+;      set velocity-x 0
+;      set velocity-y 0
+;      set velocity-z 0 
+;    ]        
+  ]
+end
+
+;; ###########################################################################
+;; Sets up variables for current diffusion algorithm. The current diffusion algorithm treats
+;; patches that have neighbours on every side different from those that do not have patches on
+;; one or more eges. Variables hold collections of such patches. The built in neighbor functions
+;; in NL3D are toroidal (and can't be set otherwise), hence each patch holds its non-toroidal
+;; neighbourhood. 
+;; ###########################################################################
+to core-diffuse-currents-setup
+  set middle-patches patches with 
+    [ (pxcor > min-pxcor + 1) and (pxcor < max-pxcor - 1) and (pycor > min-pycor + 1) and (pycor < max-pycor - 1) and (pzcor > min-pzcor + 1) and (pzcor < max-pzcor - 1) ]
+    
+  set left-patches patches with        ; patches that boarder with the left wall (x-axis)
+    [ (pxcor = min-pxcor + 1) and (pycor > min-pycor + 1) and (pycor < max-pycor - 1) and (pzcor > min-pzcor + 1) and (pzcor < max-pzcor - 1) ]    
+  set right-patches patches with       ; patches that boarder with the right wall (x-axis)
+    [ (pxcor = max-pxcor - 1) and (pycor > min-pycor + 1) and (pycor < max-pycor - 1) and (pzcor > min-pzcor + 1) and (pzcor < max-pzcor - 1) ]
+    
+  set near-patches patches with        ; patches that boarder with the near wall (y-axis)
+    [ (pxcor > min-pxcor + 1) and (pxcor < max-pxcor - 1) and (pycor = min-pycor + 1) and (pzcor > min-pzcor + 1) and (pzcor < max-pzcor - 1) ]    
+  set far-patches patches with         ; patches that boarder with the far wall (y-axis)
+    [ (pxcor > min-pxcor + 1) and (pxcor < max-pxcor - 1) and (pycor = max-pycor - 1) and (pzcor > min-pzcor + 1) and (pzcor < max-pzcor - 1) ]
+  
+  set top-patches patches with         ; patches that boarder with the surface (z-axis)
+    [ (pxcor > min-pxcor + 1) and (pxcor < max-pxcor - 1) and (pycor > min-pycor + 1) and (pycor < max-pycor - 1) and (pzcor = max-pzcor - 1) ]
+  set bottom-patches patches with      ; patches that boarder with the sea bed (z-axis)
+    [ (pxcor > min-pxcor + 1) and (pxcor < max-pxcor - 1) and (pycor > min-pycor + 1) and (pycor < max-pycor - 1) and (pzcor = min-pzcor + 1) ]
+  
+       ; these are patches that share two 6-neighbours with a tank boundary
+  set left-near-patches patches with
+    [ (pxcor = min-pxcor + 1) and (pycor = min-pycor + 1) and (pzcor > min-pzcor + 1) and (pzcor < max-pzcor - 1) ]
+  set left-far-patches patches with
+    [ (pxcor = min-pxcor + 1) and (pycor = max-pycor - 1) and (pzcor > min-pzcor + 1) and (pzcor < max-pzcor - 1) ]
+  set left-bottom-patches patches with
+    [ (pxcor = min-pxcor + 1) and (pycor > min-pycor + 1) and (pycor < max-pycor - 1) and (pzcor = min-pzcor + 1) ]
+  set left-top-patches patches with
+    [ (pxcor = min-pxcor + 1) and (pycor > min-pycor + 1) and (pycor < max-pycor - 1) and (pzcor = max-pzcor - 1) ]
+  set right-near-patches patches with
+    [ (pxcor = max-pxcor - 1) and (pycor = min-pycor + 1) and (pzcor > min-pzcor + 1) and (pzcor < max-pzcor - 1) ]
+  set right-far-patches patches with
+    [ (pxcor = max-pxcor - 1) and (pycor = max-pycor - 1) and (pzcor > min-pzcor + 1) and (pzcor < max-pzcor - 1) ]
+  set right-bottom-patches patches with
+    [ (pxcor = max-pxcor - 1) and (pycor > min-pycor + 1) and (pycor < max-pycor - 1) and (pzcor = min-pzcor + 1) ]
+  set right-top-patches patches with
+    [ (pxcor = max-pxcor - 1) and (pycor > min-pycor + 1) and (pycor < max-pycor - 1) and (pzcor = max-pzcor - 1) ]
+  set far-bottom-patches patches with
+    [ (pxcor > min-pxcor + 1) and (pxcor < max-pxcor - 1) and (pycor = max-pycor - 1) and (pzcor = min-pzcor + 1) ]
+  set far-top-patches patches with
+    [ (pxcor > min-pxcor + 1) and (pxcor < max-pxcor - 1) and (pycor = max-pycor - 1) and (pzcor = max-pzcor - 1) ]
+  set near-bottom-patches patches with
+    [ (pxcor > min-pxcor + 1) and (pxcor < max-pxcor - 1) and (pycor = min-pycor + 1) and (pzcor = min-pzcor + 1) ]
+  set near-top-patches patches with
+    [ (pxcor > min-pxcor + 1) and (pxcor < max-pxcor - 1) and (pycor = min-pycor + 1) and (pzcor = max-pzcor - 1) ]
+   
+  
+  ask middle-patches [ set neighbourhood (patch-set 
+      (patch-at -1 -1 -1) (patch-at -1 -1 0) (patch-at -1 -1 1)   (patch-at -1 0 -1) (patch-at -1 0 0) (patch-at -1 0 1)   (patch-at -1 1 -1) (patch-at -1 1 0) (patch-at -1 1 1)
+      (patch-at  0 -1 -1) (patch-at  0 -1 0) (patch-at  0 -1 1)   (patch-at  0 0 -1) (patch-at  0 0 0) (patch-at  0 0 1)   (patch-at  0 1 -1) (patch-at  0 1 0) (patch-at  0 1 1)
+      (patch-at  1 -1 -1) (patch-at  1 -1 0) (patch-at  1 -1 1)   (patch-at  1 0 -1) (patch-at  1 0 0) (patch-at  1 0 1)   (patch-at  1 1 -1) (patch-at  1 1 0) (patch-at  1 1 1) )   
+  ]
+  ask left-patches [ set neighbourhood (patch-set      
+      (patch-at  0 -1 -1) (patch-at  0 -1 0) (patch-at  0 -1 1)   (patch-at  0 0 -1) (patch-at  0 0 0) (patch-at  0 0 1)   (patch-at  0 1 -1) (patch-at  0 1 0) (patch-at  0 1 1)
+      (patch-at  1 -1 -1) (patch-at  1 -1 0) (patch-at  1 -1 1)   (patch-at  1 0 -1) (patch-at  1 0 0) (patch-at  1 0 1)   (patch-at  1 1 -1) (patch-at  1 1 0) (patch-at  1 1 1) )           
+  ]
+  ask right-patches [  set neighbourhood (patch-set 
+      (patch-at -1 -1 -1) (patch-at -1 -1 0) (patch-at -1 -1 1)   (patch-at -1 0 -1) (patch-at -1 0 0) (patch-at -1 0 1)   (patch-at -1 1 -1) (patch-at -1 1 0) (patch-at -1 1 1)
+      (patch-at  0 -1 -1) (patch-at  0 -1 0) (patch-at  0 -1 1)   (patch-at  0 0 -1) (patch-at  0 0 0) (patch-at  0 0 1)   (patch-at  0 1 -1) (patch-at  0 1 0) (patch-at  0 1 1) )     
+  ]
+  ask near-patches [  set neighbourhood (patch-set
+                                                                  (patch-at -1 0 -1) (patch-at -1 0 0) (patch-at -1 0 1)   (patch-at -1 1 -1) (patch-at -1 1 0) (patch-at -1 1 1)
+                                                                  (patch-at  0 0 -1) (patch-at  0 0 0) (patch-at  0 0 1)   (patch-at  0 1 -1) (patch-at  0 1 0) (patch-at  0 1 1)
+                                                                  (patch-at  1 0 -1) (patch-at  1 0 0) (patch-at  1 0 1)   (patch-at  1 1 -1) (patch-at  1 1 0) (patch-at  1 1 1) )    
+  ]
+  ask far-patches [ set neighbourhood (patch-set
+      (patch-at -1 -1 -1) (patch-at -1 -1 0) (patch-at -1 -1 1)   (patch-at -1 0 -1) (patch-at -1 0 0) (patch-at -1 0 1) 
+      (patch-at  0 -1 -1) (patch-at  0 -1 0) (patch-at  0 -1 1)   (patch-at  0 0 -1) (patch-at  0 0 0) (patch-at  0 0 1)
+      (patch-at  1 -1 -1) (patch-at  1 -1 0) (patch-at  1 -1 1)   (patch-at  1 0 -1) (patch-at  1 0 0) (patch-at  1 0 1) )       
+  ]
+  ask top-patches [ set neighbourhood (patch-set
+      (patch-at -1 -1 -1) (patch-at -1 -1 0)                      (patch-at -1 0 -1) (patch-at -1 0 0)                     (patch-at -1 1 -1) (patch-at -1 1 0)
+      (patch-at  0 -1 -1) (patch-at  0 -1 0)                      (patch-at  0 0 -1) (patch-at  0 0 0)                     (patch-at  0 1 -1) (patch-at  0 1 0)
+      (patch-at  1 -1 -1) (patch-at  1 -1 0)                      (patch-at  1 0 -1) (patch-at  1 0 0)                     (patch-at  1 1 -1) (patch-at  1 1 0) )   
+  ]
+  ask bottom-patches [ set neighbourhood (patch-set
+                          (patch-at -1 -1 0) (patch-at -1 -1 1)                      (patch-at -1 0 0) (patch-at -1 0 1)                      (patch-at -1 1 0) (patch-at -1 1 1)
+                          (patch-at  0 -1 0) (patch-at  0 -1 1)                      (patch-at  0 0 0) (patch-at  0 0 1)                      (patch-at  0 1 0) (patch-at  0 1 1)
+                          (patch-at  1 -1 0) (patch-at  1 -1 1)                      (patch-at  1 0 0) (patch-at  1 0 1)                      (patch-at  1 1 0) (patch-at  1 1 1) )         
+  ]
+
+  ask left-near-patches [ set neighbourhood (patch-set ; -1 xs, and -1 ys removed. 
+                                                                  (patch-at  0 0 -1) (patch-at  0 0 0) (patch-at  0 0 1)   (patch-at  0 1 -1) (patch-at  0 1 0) (patch-at  0 1 1)
+                                                                  (patch-at  1 0 -1) (patch-at  1 0 0) (patch-at  1 0 1)   (patch-at  1 1 -1) (patch-at  1 1 0) (patch-at  1 1 1) )        
+  ]
+  ask left-far-patches [ set neighbourhood (patch-set ; -1 xs, and +1 ys removed
+      (patch-at  0 -1 -1) (patch-at  0 -1 0) (patch-at  0 -1 1)   (patch-at  0 0 -1) (patch-at  0 0 0) (patch-at  0 0 1)   
+      (patch-at  1 -1 -1) (patch-at  1 -1 0) (patch-at  1 -1 1)   (patch-at  1 0 -1) (patch-at  1 0 0) (patch-at  1 0 1) )         
+  ]
+  ask left-bottom-patches [ set neighbourhood (patch-set ; -1 xs and -1 zs removed
+                          (patch-at  0 -1 0) (patch-at  0 -1 1)                      (patch-at  0 0 0) (patch-at  0 0 1)                      (patch-at  0 1 0) (patch-at  0 1 1)
+                          (patch-at  1 -1 0) (patch-at  1 -1 1)                      (patch-at  1 0 0) (patch-at  1 0 1)                      (patch-at  1 1 0) (patch-at  1 1 1) )       
+  ]
+  ask left-top-patches [ set neighbourhood (patch-set ; -1 xs and +1 xs removed
+      (patch-at  0 -1 -1) (patch-at  0 -1 0)                      (patch-at  0 0 -1) (patch-at  0 0 0)                     (patch-at  0 1 -1) (patch-at  0 1 0) 
+      (patch-at  1 -1 -1) (patch-at  1 -1 0)                      (patch-at  1 0 -1) (patch-at  1 0 0)                     (patch-at  1 1 -1) (patch-at  1 1 0) )        
+  ]
+  ask right-near-patches [ set neighbourhood (patch-set ; +1 xs and -1 ys removed
+                                                                  (patch-at -1 0 -1) (patch-at -1 0 0) (patch-at -1 0 1)   (patch-at -1 1 -1) (patch-at -1 1 0) (patch-at -1 1 1)
+                                                                  (patch-at  0 0 -1) (patch-at  0 0 0) (patch-at  0 0 1)   (patch-at  0 1 -1) (patch-at  0 1 0) (patch-at  0 1 1) )       
+  ]
+  ask right-far-patches [ set neighbourhood (patch-set ; +1 xs and +1 ys removed
+      (patch-at -1 -1 -1) (patch-at -1 -1 0) (patch-at -1 -1 1)   (patch-at -1 0 -1) (patch-at -1 0 0) (patch-at -1 0 1)  
+      (patch-at  0 -1 -1) (patch-at  0 -1 0) (patch-at  0 -1 1)   (patch-at  0 0 -1) (patch-at  0 0 0) (patch-at  0 0 1) )       
+  ]
+  ask right-bottom-patches [ set neighbourhood (patch-set ; +1 xs and -1 zs removed
+                          (patch-at -1 -1 0) (patch-at -1 -1 1)                      (patch-at -1 0 0) (patch-at -1 0 1)                      (patch-at -1 1 0) (patch-at -1 1 1)
+                          (patch-at  0 -1 0) (patch-at  0 -1 1)                      (patch-at  0 0 0) (patch-at  0 0 1)                      (patch-at  0 1 0) (patch-at  0 1 1) ) 
+  ]
+  ask right-top-patches [ set neighbourhood (patch-set ; +1 xs and +1 za removed
+      (patch-at -1 -1 -1) (patch-at -1 -1 0)                      (patch-at -1 0 -1) (patch-at -1 0 0)                     (patch-at -1 1 -1) (patch-at -1 1 0)
+      (patch-at  0 -1 -1) (patch-at  0 -1 0)                      (patch-at  0 0 -1) (patch-at  0 0 0)                     (patch-at  0 1 -1) (patch-at  0 1 0) ) 
+  ]
+  ask far-bottom-patches [ set neighbourhood (patch-set ; +1 ys and -1 zs removed
+                          (patch-at -1 -1 0) (patch-at -1 -1 1)                      (patch-at -1 0 0) (patch-at -1 0 1) 
+                          (patch-at  0 -1 0) (patch-at  0 -1 1)                      (patch-at  0 0 0) (patch-at  0 0 1)
+                          (patch-at  1 -1 0) (patch-at  1 -1 1)                      (patch-at  1 0 0) (patch-at  1 0 1) )        
+  ]
+  ask far-top-patches [ set neighbourhood (patch-set ; +1 ys and +1 zs removed
+      (patch-at -1 -1 -1) (patch-at -1 -1 0)                      (patch-at -1 0 -1) (patch-at -1 0 0)  
+      (patch-at  0 -1 -1) (patch-at  0 -1 0)                      (patch-at  0 0 -1) (patch-at  0 0 0) 
+      (patch-at  1 -1 -1) (patch-at  1 -1 0)                      (patch-at  1 0 -1) (patch-at  1 0 0)  )        
+  ]
+  ask near-bottom-patches [ set neighbourhood (patch-set ; -1 ys and -1 zs removed
+                                                                                     (patch-at -1 0 0) (patch-at -1 0 1)                      (patch-at -1 1 0) (patch-at -1 1 1)
+                                                                                     (patch-at  0 0 0) (patch-at  0 0 1)                      (patch-at  0 1 0) (patch-at  0 1 1)
+                                                                                     (patch-at  1 0 0) (patch-at  1 0 1)                      (patch-at  1 1 0) (patch-at  1 1 1) )    
+  ]
+  ask near-top-patches [ set neighbourhood (patch-set ; -1 ys and +1 zs removed
+                                                                  (patch-at -1 0 -1) (patch-at -1 0 0)                     (patch-at -1 1 -1) (patch-at -1 1 0) 
+                                                                  (patch-at  0 0 -1) (patch-at  0 0 0)                     (patch-at  0 1 -1) (patch-at  0 1 0) 
+                                                                  (patch-at  1 0 -1) (patch-at  1 0 0)                     (patch-at  1 1 -1) (patch-at  1 1 0)  )    
+  ]    
+     
+  set left-near-top-patch     patch (min-pxcor + 1) (min-pycor + 1) (max-pzcor - 1)
+  set left-far-top-patch      patch (min-pxcor + 1) (max-pycor - 1) (max-pzcor - 1)
+  set left-near-bottom-patch  patch (min-pxcor + 1) (min-pycor + 1) (min-pzcor + 1)
+  set left-far-bottom-patch   patch (min-pxcor + 1) (max-pycor - 1) (min-pzcor + 1)
+  set right-near-top-patch    patch (max-pxcor - 1) (min-pycor + 1) (max-pzcor - 1)
+  set right-far-top-patch     patch (max-pxcor - 1) (max-pycor - 1) (max-pzcor - 1)
+  set right-near-bottom-patch patch (max-pxcor - 1) (min-pycor + 1) (min-pzcor + 1)
+  set right-far-bottom-patch  patch (max-pxcor - 1) (max-pycor - 1) (min-pzcor + 1)
+
+  ask left-near-top-patch     [ set neighbourhood (patch-set      
+      (patch-at  0 0 -1) (patch-at  0 0 0)   (patch-at  0 1 -1) (patch-at  0 1 0)
+      (patch-at  1 0 -1) (patch-at  1 0 0)   (patch-at  1 1 -1) (patch-at  1 1 0) )       
+  ]
+  ask left-far-top-patch      [ set neighbourhood (patch-set 
+      (patch-at  0 -1 -1) (patch-at  0 -1 0)   (patch-at  0 0 -1) (patch-at  0 0 0)
+      (patch-at  1 -1 -1) (patch-at  1 -1 0)   (patch-at  1 0 -1) (patch-at  1 0 0) )       
+  ]
+  ask left-near-bottom-patch  [ set neighbourhood (patch-set 
+      (patch-at  0 0 0) (patch-at  0 0 1)   (patch-at  0 1 0) (patch-at  0 1 1)
+      (patch-at  1 0 0) (patch-at  1 0 1)   (patch-at  1 1 0) (patch-at  1 1 1) )       
+  ]
+  ask left-far-bottom-patch   [ set neighbourhood (patch-set 
+      (patch-at  0 -1 0) (patch-at  0 -1 1)   (patch-at  0 0 0) (patch-at  0 0 1) 
+      (patch-at  1 -1 0) (patch-at  1 -1 1)   (patch-at  1 0 0) (patch-at  1 0 1) )       
+  ]
+  ask right-near-top-patch    [ set neighbourhood (patch-set 
+      (patch-at -1 0 -1) (patch-at -1 0 0)   (patch-at -1 1 -1) (patch-at -1 1 0)
+      (patch-at  0 0 -1) (patch-at  0 0 0)   (patch-at  0 1 -1) (patch-at  0 1 0) )       
+  ]
+  ask right-far-top-patch     [ set neighbourhood (patch-set 
+      (patch-at -1 -1 -1) (patch-at -1 -1 0)    (patch-at -1 0 -1) (patch-at -1 0 0) 
+      (patch-at  0 -1 -1) (patch-at  0 -1 0)    (patch-at  0 0 -1) (patch-at  0 0 0) )       
+  ]
+  ask right-near-bottom-patch [ set neighbourhood (patch-set 
+      (patch-at -1 0 0) (patch-at -1 0 1)   (patch-at -1 1 0) (patch-at -1 1 1)
+      (patch-at  0 0 0) (patch-at  0 0 1)   (patch-at  0 1 0) (patch-at  0 1 1) )       
+  ]
+  ask right-far-bottom-patch  [ set neighbourhood (patch-set 
+      (patch-at -1 -1 0) (patch-at -1 -1 1)   (patch-at -1 0 0) (patch-at -1 0 1)
+      (patch-at  0 -1 0) (patch-at  0 -1 1)   (patch-at  0 0 0) (patch-at  0 0 1) ) 
+  ] 
+end
+
+
+;; ###########################################################################
+;; Diffuses currents around the environment. 
+;; ###########################################################################
+to core-current-diffusion
+  ask patches with [water? = true]
+  [
+    set old-current-x current-x * current-diffusion-rate
+    set old-current-y current-y * current-diffusion-rate
+    set old-current-z current-z * current-diffusion-rate
+    set current-x current-x * (1.0 - current-diffusion-rate)
+    set current-y current-y * (1.0 - current-diffusion-rate)
+    set current-z current-z * (1.0 - current-diffusion-rate)
+  ]
+  
+  ask middle-patches 
+  [
+    set current-x current-x + (mean [ old-current-x ] of neighbourhood)       ;; this is 26 neighbourhood
+    set current-y current-y + (mean [ old-current-y ] of neighbourhood)
+    set current-z current-z + (mean [ old-current-z ] of neighbourhood)
+  ]  
+       ; ---------- patches that lie on a solid face on only one side ----------
+  ask left-patches
+  [
+     set current-y current-y + (mean [old-current-y] of neighbourhood)
+     set current-z current-z + (mean [old-current-z] of neighbourhood)
+     let mag-x mean [old-current-x] of neighbourhood
+     let distribute mag-x / 4
+     
+     ask patch-at 0 -1  0 [ set current-y current-y + distribute ] 
+     ask patch-at 0  0  1 [ set current-z current-z - distribute ]
+     ask patch-at 0  1  0 [ set current-y current-y - distribute ]
+     ask patch-at 0  0 -1 [ set current-z current-z + distribute ]
+  ]
+  ask right-patches
+  [
+     set current-y current-y + (mean [old-current-y] of neighbourhood)
+     set current-z current-z + (mean [old-current-z] of neighbourhood)
+     let mag-x mean [old-current-x] of neighbourhood
+     let distribute mag-x / 4
+     
+     ask patch-at 0 -1  0 [ set current-y current-y - distribute ] 
+     ask patch-at 0  0  1 [ set current-z current-z + distribute ]
+     ask patch-at 0  1  0 [ set current-y current-y + distribute ]
+     ask patch-at 0  0 -1 [ set current-z current-z - distribute ]
+  ]
+  ask far-patches
+  [ 
+    set current-x current-x + (mean [ old-current-x ] of neighbourhood)
+    set current-z current-z + (mean [ old-current-z ] of neighbourhood)
+    let mag-y mean [ old-current-y ] of neighbourhood
+    let distribute mag-y / 4             ;; will distribute current heading into the wall among the 4-neighbourhood. 
+
+    ask patch-at -1 0  0 [ set current-x current-x - distribute ]
+    ask patch-at  0 0  1 [ set current-z current-z + distribute ]
+    ask patch-at  1 0  0 [ set current-x current-x + distribute ]
+    ask patch-at  0 0 -1 [ set current-z current-z - distribute ]
+  ]  
+  ask near-patches
+  [
+    set current-x current-x + (mean [old-current-x] of neighbourhood)
+    set current-z current-z + (mean [old-current-z] of neighbourhood)
+    let mag-y mean [old-current-y] of neighbourhood
+    let distribute mag-y / 4
+    
+    ask patch-at -1 0  0 [ set current-x current-x + distribute ]
+    ask patch-at  0 0  1 [ set current-z current-z - distribute ]
+    ask patch-at  1 0  0 [ set current-x current-x - distribute ]
+    ask patch-at  0 0 -1 [ set current-z current-z + distribute ]
+  ]  
+  ask bottom-patches
+  [
+    set current-x current-x + (mean [old-current-x] of neighbourhood)
+    set current-y current-y + (mean [old-current-y] of neighbourhood)
+    let mag-z mean [old-current-z] of neighbourhood
+    let distribute mag-z / 4
+    
+    ask patch-at -1  0 0 [ set current-x current-x + distribute ]
+    ask patch-at  0  1 0 [ set current-y current-y - distribute ]
+    ask patch-at  1  0 0 [ set current-x current-x - distribute ]
+    ask patch-at  0 -1 0 [ set current-y current-y + distribute ]
+  ]
+  ask top-patches
+  [
+    set current-x current-x + (mean [old-current-x] of neighbourhood)
+    set current-y current-y + (mean [old-current-y] of neighbourhood)
+    let mag-z mean [old-current-z] of neighbourhood
+    let distribute mag-z / 4
+    
+    ask patch-at -1  0 0 [ set current-x current-x - distribute ]
+    ask patch-at  0  1 0 [ set current-y current-y + distribute ]
+    ask patch-at  1  0 0 [ set current-x current-x + distribute ]
+    ask patch-at  0 -1 0 [ set current-y current-y - distribute ]    
+  ]
+     ; ---------- patches that have a solid face on two sides (edges, but not corners) --------
+  ask left-near-patches
+  [
+    set current-z current-z + (mean [old-current-z] of neighbourhood)
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-y mean [old-current-y] of neighbourhood
+    set current-x current-x + (mag-x / 2) - (mag-y / 2)
+    set current-y current-y - (mag-x / 2) + (mag-y / 2)
+  ]
+  ask left-far-patches   
+  [ 
+    set current-z current-z + (mean [old-current-z] of neighbourhood)
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-y mean [old-current-y] of neighbourhood
+    set current-x current-x + (mag-x / 2) + (mag-y / 2)
+    set current-y current-y + (mag-x / 2) + (mag-y / 2)    
+  ]
+  ask left-bottom-patches
+  [
+    set current-y current-y + (mean [old-current-y] of neighbourhood) 
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-x current-x + (mag-x / 2) - (mag-z / 2)
+    set current-z current-z - (mag-x / 2) + (mag-z / 2) 
+  ]
+  ask left-top-patches
+  [
+    set current-y current-y + (mean [old-current-y] of neighbourhood)
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-x current-x + (mag-x / 2) + (mag-z / 2)
+    set current-z current-z + (mag-x / 2) + (mag-z / 2)    
+  ]
+  ask right-near-patches   
+  [
+    set current-z current-z + (mean [old-current-z] of neighbourhood)
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-y mean [old-current-y] of neighbourhood
+    set current-x current-x + (mag-x / 2) + (mag-y / 2)
+    set current-y current-y + (mag-x / 2) + (mag-y / 2)  
+  ]
+  ask right-far-patches   
+  [
+    set current-z current-z + (mean [old-current-z] of neighbourhood)
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-y mean [old-current-y] of neighbourhood
+    set current-x current-x + (mag-x / 2) - (mag-y / 2)
+    set current-y current-y - (mag-x / 2) + (mag-y / 2)  
+  ]
+  ask right-bottom-patches
+  [
+    set current-y current-y + (mean [old-current-y] of neighbourhood)      
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-x current-x + (mag-x / 2) + (mag-z / 2)
+    set current-z current-z + (mag-x / 2) + (mag-z / 2)
+  ]
+  ask right-top-patches
+  [
+    set current-y current-y + (mean [old-current-y] of neighbourhood) 
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-x current-x + (mag-x / 2) - (mag-z / 2)
+    set current-z current-z - (mag-x / 2) + (mag-z / 2)     
+  ]
+  ask far-bottom-patches
+  [
+    set current-x current-x + (mean [old-current-x] of neighbourhood)
+    let mag-y mean [old-current-y] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-y current-y + (mag-y / 2) + (mag-z / 2)  
+    set current-z current-z + (mag-y / 2) + (mag-z / 2)
+  ]
+  ask far-top-patches
+  [
+    set current-x current-x + (mean [old-current-x] of neighbourhood)
+    let mag-y mean [old-current-y] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-y current-y + (mag-y / 2) - (mag-z / 2)  
+    set current-z current-z - (mag-y / 2) + (mag-z / 2)    
+  ]
+  ask near-bottom-patches
+  [
+    set current-x current-x + (mean [old-current-x] of neighbourhood)
+    let mag-y mean [old-current-y] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-y current-y + (mag-y / 2) - (mag-z / 2)  
+    set current-z current-z - (mag-y / 2) + (mag-z / 2)
+  ]
+  ask near-top-patches
+  [
+    set current-x current-x + (mean [old-current-x] of neighbourhood)
+    let mag-y mean [old-current-y] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-y current-y + (mag-y / 2) + (mag-z / 2)  
+    set current-z current-z + (mag-y / 2) + (mag-z / 2)    
+  ]
+     ; ---------- patches that have a solid face on three sides, these are corners of the tank --------
+  ask left-near-top-patch
+  [
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-y mean [old-current-y] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-x current-x + (mag-x / 3) - (mag-y / 3) + (mag-z / 3)
+    set current-y current-y - (mag-x / 3) + (mag-y / 3) + (mag-z / 3)
+    set current-z current-z + (mag-x / 3) + (mag-y / 3) + (mag-z / 3)
+  ]
+  ask left-far-top-patch
+  [
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-y mean [old-current-y] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-x current-x + (mag-x / 3) + (mag-y / 3) + (mag-z / 3)
+    set current-y current-y + (mag-x / 3) + (mag-y / 3) - (mag-z / 3)
+    set current-z current-z + (mag-x / 3) - (mag-y / 3) + (mag-z / 3)    
+  ]
+  ask left-near-bottom-patch   ;tested
+  [
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-y mean [old-current-y] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-x current-x + (mag-x / 3) - (mag-y / 3) - (mag-z / 3)
+    set current-y current-y - (mag-x / 3) + (mag-y / 3) - (mag-z / 3)
+    set current-z current-z - (mag-x / 3) - (mag-y / 3) + (mag-z / 3)    
+  ]
+  ask left-far-bottom-patch
+  [
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-y mean [old-current-y] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-x current-x + (mag-x / 3) + (mag-y / 3) - (mag-z / 3)
+    set current-y current-y + (mag-x / 3) + (mag-y / 3) + (mag-z / 3)
+    set current-z current-z - (mag-x / 3) + (mag-y / 3) + (mag-z / 3)    
+  ]
+  ask right-near-top-patch
+  [
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-y mean [old-current-y] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-x current-x + (mag-x / 3) + (mag-y / 3) - (mag-z / 3)
+    set current-y current-y + (mag-x / 3) + (mag-y / 3) + (mag-z / 3)
+    set current-z current-z - (mag-x / 3) + (mag-y / 3) + (mag-z / 3)    
+  ]
+  ask right-far-top-patch
+  [
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-y mean [old-current-y] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-x current-x + (mag-x / 3) - (mag-y / 3) - (mag-z / 3)
+    set current-y current-y - (mag-x / 3) + (mag-y / 3) - (mag-z / 3)
+    set current-z current-z - (mag-x / 3) - (mag-y / 3) + (mag-z / 3)    
+  ]
+  ask right-near-bottom-patch ; the patch information looks correct, yet the arrow heading is incorrect when setting right-near-edge z currents?!?!
+  [
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-y mean [old-current-y] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-x current-x + (mag-x / 3) + (mag-y / 3) + (mag-z / 3)
+    set current-y current-y + (mag-x / 3) + (mag-y / 3) - (mag-z / 3)
+    set current-z current-z + (mag-x / 3) - (mag-y / 3) + (mag-z / 3)    
+  ]
+  ask right-far-bottom-patch  
+  [
+    let mag-x mean [old-current-x] of neighbourhood
+    let mag-y mean [old-current-y] of neighbourhood
+    let mag-z mean [old-current-z] of neighbourhood
+    set current-x current-x + (mag-x / 3) - (mag-y / 3) + (mag-z / 3)
+    set current-y current-y - (mag-x / 3) + (mag-y / 3) + (mag-z / 3)
+    set current-z current-z + (mag-x / 3) + (mag-y / 3) + (mag-z / 3)    
+  ] 
+end
+
+
+;; ###########################################################################
+;; Function that applies a logarithmic decay to current forces
+;; ###########################################################################
+to core-current-decay
+  ask patches
+  [
+    set current-x current-x * current-decay-rate
+    set current-y current-y * current-decay-rate
+    set current-z current-z * current-decay-rate 
+  ]
+end
+
+
+
+;; ###########################################################################
+;; This is responsible for creating hot spots and cold spots. 
+;;
+;; Cold and hot spots are represented as non-moving turtles (to capture state). 
+;; They are created in random locations underwater, and provide either high or 
+;; low pressures, hence moving currents around. The implementation allows for 
+;; these hot/cold spots to persist for a little while. They have a cyclic nature to
+;; the pressure they provide, based on a sin wave. Hence, pressure is brought on
+;; gradually, reaches a peak, and then reduces again. At the end of a cycle
+;; the turtle is destroyed. 
+;; ###########################################################################
+to core-current-maintain-source-sink
+  let per-step current-sink-spawn-probability * (count (patches with [water? = true])) / 0.5 
+  
+  ifelse per-step < 1
+  [
+     if random-float 1.0 < per-step
+     [
+       core-current-spawn-sink 
+     ]
+  ][
+    repeat per-step
+    [ core-current-spawn-sink ] 
+  ] 
+
+  ask current-source-sinks ; maintenance of sources and sinks. 
+  [
+    set degree degree + degree-increment
+    if degree > 180 [ die ]    ; source/sink expires, having been through whole cycle.
+    let magnitude-level (sin degree) * current-sink-max-magnitude * polarisation   
+    let lesser-magnitude-level magnitude-level * 0.707   ; 0.707 is roughly sin 45 - the magnitude split across two dimensions. 
+
+    ; ring of horrizontal neighbourhing patches
+    ask patch-at  1  0  0 [ set current-x current-x + magnitude-level ]
+    ask patch-at  1  1  0 [ set current-x current-x + lesser-magnitude-level set current-y current-y + lesser-magnitude-level ]
+    ask patch-at  0  1  0 [ set current-y current-y + magnitude-level ]    
+    ask patch-at -1  1  0 [ set current-x current-x - lesser-magnitude-level set current-y current-y + lesser-magnitude-level ]
+    ask patch-at -1  0  0 [ set current-x current-x - magnitude-level ]
+    ask patch-at -1 -1  0 [ set current-x current-x - lesser-magnitude-level set current-y current-y - lesser-magnitude-level ]
+    ask patch-at  0 -1  0 [ set current-y current-y - magnitude-level ]
+    ask patch-at  1 -1  0 [ set current-x current-x + lesser-magnitude-level set current-y current-y - lesser-magnitude-level ]
+    
+    ; directly up, and up-left -right -front and -back
+    ask patch-at  0  0  1 [ set current-z current-z + magnitude-level ]
+    ask patch-at  1  0  1 [ set current-x current-x + magnitude-level set current-z current-z + magnitude-level ]
+    ask patch-at  0  1  1 [ set current-y current-y + magnitude-level set current-z current-z + magnitude-level ]
+    ask patch-at  0 -1  1 [ set current-y current-y - magnitude-level set current-z current-z + magnitude-level ]
+    ask patch-at -1  0  1 [ set current-x current-x - magnitude-level set current-z current-z + magnitude-level ]
+    
+    ; directly down and down-left -right -front and -back
+    ask patch-at  0  0 -1 [ set current-z current-z - magnitude-level ]   
+    ask patch-at  1  0 -1 [ set current-x current-x + magnitude-level set current-z current-z - magnitude-level ]
+    ask patch-at  0  1 -1 [ set current-y current-y + magnitude-level set current-z current-z - magnitude-level ]
+    ask patch-at  0 -1 -1 [ set current-y current-y - magnitude-level set current-z current-z - magnitude-level ]
+    ask patch-at -1  0 -1 [ set current-x current-x - magnitude-level set current-z current-z - magnitude-level ]    
+  ]
+end
+
+
+;; ###########################################################################
+;; Creates a current sink: a turtle that attracts current towards it. 
+;; One sink is created, in a random water patch (there is no constraint that the 
+;; water patch cannot already contain a sink/source).
+;; ###########################################################################
+to core-current-spawn-sink
+  ask one-of patches with [water? = true]
+  [ sprout-current-source-sinks 1
+    [
+      set degree 0 
+      set degree-increment 180 / current-source-sink-duration   ; hot much the degree is incremented by each tick (this is actually the same for each hotspot, so could be stored globally)
+      set polarisation -1   ;; polarisation of 1, indicates this is a source
+
+      ifelse current-debug?
+      [ 
+        set size 0.25
+        set color blue
+      ][ set size 0 ]
+      
+    ]
+  ]  
+end
+
+
+
+;; ###########################################################################
+;; Currents and turbulence that result from AUV thrusters operating. 
+;;
+;; AUVs suck water into the thrusters from the horrizontal sides. Water is pushed out of the thrusters
+;; directly backwards, backwards-left and -right on the horrizontal plane, and backwards-up and -down on 
+;; the vertical plane. If a thruster is in reverse, then the water is thrust to the front of the AUV
+;; rather than behind it. 
+;;
+;; The water displacement (current) is related to thruster force. 
+;;
+;; The code currently handles changes in AUV pitch and heading, but not roll. 
+;; ###########################################################################
+to core-current-AUV-turbulence
+  let thrust-open-angle 30
+  ask (turtle-set all-AUVs)
+  [
+    let  left-thrust (item 0 list-of-actuator-volt-values) / 10
+    let right-thrust (item 1 list-of-actuator-volt-values) / 10
+    
+    ;; suction into the thrusters, from the left and right of the AUV. 
+    let sucked-right-x right-thrust * (sin (heading - 90)) * (cos pitch)  ;; magnitude reflects orientation (sucking) on the AUV. Hence "-90", reflects the direction of the suction. 
+    let sucked-right-y right-thrust * (cos (heading - 90)) * (cos pitch)
+    let sucked-right-z right-thrust * (sin pitch)
+    let sucked-left-x left-thrust * (sin (heading + 90)) * (cos pitch)    ;; magnitude reflects orientation (sucking) on AUV. Hence "+90" reflects the direction of the suction. 
+    let sucked-left-y left-thrust * (cos (heading + 90)) * (cos pitch)
+    let sucked-left-z left-thrust * (sin pitch)
+    
+    ;; directly backward thrust components (pushed out from the AUV)
+    let pushed-back-left-x (left-thrust / 4) * (sin heading) * (cos pitch)    ; thruster reversal alters the patch to which vector is applied. Hence, only absolute magnitudes are indicated here. 
+    let pushed-back-left-y (left-thrust / 4) * (cos heading) * (cos pitch)
+    let pushed-back-left-z (left-thrust / 4) * (sin pitch)
+    let pushed-back-right-x (right-thrust / 4) * (sin heading) * (cos pitch)
+    let pushed-back-right-y (right-thrust / 4) * (cos heading) * (cos pitch)
+    let pushed-back-right-z (right-thrust / 4) * (sin pitch)
+    
+    ;; back-left thrust components (pushed out from AUV)
+    let pushed-left-x (left-thrust / 4) * sin (heading + thrust-open-angle) * (cos pitch)
+    let pushed-left-y (left-thrust / 4) * cos (heading + thrust-open-angle) * (cos pitch)
+    let pushed-left-z (left-thrust / 4) * (sin pitch)
+    
+    ;; back-right thrust components (pushed out from AUV)
+    let pushed-right-x (right-thrust / 4) * sin (heading - thrust-open-angle) * (cos pitch)
+    let pushed-right-y (right-thrust / 4) * cos (heading - thrust-open-angle) * (cos pitch)
+    let pushed-right-z (right-thrust / 4) * (sin pitch)
+    
+    ;; back-up thrust components (pushed out from AUV)
+    let pushed-up-right-x (right-thrust / 4) * (sin heading) * (cos pitch)
+    let pushed-up-right-y (right-thrust / 4) * (cos heading) * (cos pitch)
+    let pushed-up-right-z (right-thrust / 4) * sin (pitch - thrust-open-angle)
+    let pushed-up-left-x  (left-thrust / 4)  * (sin heading) * (cos pitch)
+    let pushed-up-left-y  (left-thrust / 4)  * (cos heading) * (cos pitch)
+    let pushed-up-left-z  (left-thrust / 4)  * sin (pitch - thrust-open-angle)
+    
+    ;; back-down thrust components (pushed out from AUV)
+    let pushed-down-right-x (right-thrust / 4) * (sin heading) * (cos pitch)
+    let pushed-down-right-y (right-thrust / 4) * (cos heading) * (cos pitch)
+    let pushed-down-right-z (right-thrust / 4) * sin (pitch + thrust-open-angle)
+    let pushed-down-left-x  (left-thrust / 4)  * (sin heading) * (cos pitch)
+    let pushed-down-left-y  (left-thrust / 4)  * (cos heading) * (cos pitch)
+    let pushed-down-left-z  (left-thrust / 4)  * sin (pitch + thrust-open-angle)    
+    
+    ;; Left Thruster
+    ifelse left-thrust >= 0.0    ;; positive thrust, pushing the AUV forward; vector added to patch behind AUV 
+      [
+        ;; directly behind AUV
+        ask patch-at-heading-pitch-and-distance heading pitch -1
+        [ core-current-update-patch-thrust  pushed-back-left-x pushed-back-left-y pushed-back-left-z ]
+
+        ;; 45 to get patch next to the one directly behind/in front
+        ask patch-at-heading-pitch-and-distance (heading + 45) pitch -1 
+        [ core-current-update-patch-thrust pushed-left-x      pushed-left-y      pushed-left-z ]
+
+        ;; the patch back and up from the AUV
+        ask patch-at-heading-pitch-and-distance heading (pitch - 45) -1
+        [ core-current-update-patch-thrust  pushed-up-left-x   pushed-up-left-y   pushed-up-left-z ]
+
+        ;; the patch back and down from the AUV
+        ask patch-at-heading-pitch-and-distance heading (pitch + 45) -1
+        [ core-current-update-patch-thrust  pushed-down-left-x pushed-down-left-y pushed-down-left-z ]
+      ]  
+      [ ;; left thruster is in reverse
+        ;; directly in front of AUV (because thruster in reverse)
+        ask patch-at-heading-pitch-and-distance heading pitch 1
+        [ core-current-update-patch-thrust  pushed-back-left-x pushed-back-left-y pushed-back-left-z ]
+
+        ask patch-at-heading-pitch-and-distance (heading + 45) pitch 1 ;; 45 to get patch next to the one directly behind/in front... 
+        [ core-current-update-patch-thrust  pushed-left-x      pushed-left-y      pushed-left-z ]
+
+        ;; the patch front and up from the AUV
+        ask patch-at-heading-pitch-and-distance heading (pitch - 45) 1
+        [ core-current-update-patch-thrust  pushed-up-left-x   pushed-up-left-y   pushed-up-left-z ]
+
+        ;; the patch front and down from the AUV
+        ask patch-at-heading-pitch-and-distance heading (pitch + 45) 1
+        [ core-current-update-patch-thrust  pushed-down-left-x pushed-down-left-y pushed-down-left-z ]
+      ]
+    
+    ;; Right Thruster
+    ifelse right-thrust >= 0.0
+      [
+        ask patch-at-heading-pitch-and-distance heading pitch -1
+        [ core-current-update-patch-thrust  pushed-back-right-x pushed-back-right-y pushed-back-right-z ]
+ 
+        ask patch-at-heading-pitch-and-distance (heading - 45) pitch -1
+        [ core-current-update-patch-thrust  pushed-right-x      pushed-right-y      pushed-right-z ]
+
+        ;; the patch back and up from the AUV
+        ask patch-at-heading-pitch-and-distance heading (pitch - 45) -1
+        [ core-current-update-patch-thrust  pushed-up-right-x   pushed-up-right-y   pushed-up-right-z ]
+
+        ;; the patch back and down from the AUV
+        ask patch-at-heading-pitch-and-distance heading (pitch + 45) -1
+        [ core-current-update-patch-thrust  pushed-down-right-x pushed-down-right-y pushed-down-right-z ]
+      ]
+      [ ;; right thruster is in reverse
+        ask patch-at-heading-pitch-and-distance heading pitch 1
+        [ core-current-update-patch-thrust  pushed-back-right-x pushed-back-right-y pushed-back-right-z ]
+
+        ask patch-at-heading-pitch-and-distance (heading - 45) pitch 1
+        [ core-current-update-patch-thrust  pushed-right-x      pushed-right-y      pushed-right-z ]
+        
+        ;; the patch front and up from the AUV
+        ask patch-at-heading-pitch-and-distance heading (pitch - 45) 1
+        [ core-current-update-patch-thrust  pushed-up-right-x   pushed-up-right-y   pushed-up-right-z ]
+
+        ;; the patch front and down from the AUV
+        ask patch-at-heading-pitch-and-distance heading (pitch + 45) -1
+        [ core-current-update-patch-thrust  pushed-down-right-x pushed-down-right-y pushed-down-right-z ]
+      ]
+    
+    ;; current being sucked into the thrusters.  
+    ;; patch left, current sucked into the propellers
+    ask patch-at-heading-pitch-and-distance (heading - 90) pitch 1
+    [ core-current-update-patch-suction sucked-left-x sucked-left-y sucked-left-z ] ; suction vector added since its magnitude already reflects direction. 
+
+    ;; patch right, current sucked into the propellers
+    ask patch-at-heading-pitch-and-distance (heading + 90) pitch 1
+    [ core-current-update-patch-suction sucked-right-x sucked-right-y sucked-right-z ] ; suction vector added since its magnitude already reflects direction. 
+
+  ] 
+end
+
+;; ###########################################################################
+;; A minor utility function called by a patch to modify the current components
+;; by the specified quantity. This function is specific to currents being THRUST
+;; into an AUV (this depends on how the calling code is written). 
+;; ###########################################################################
+to core-current-update-patch-thrust [ x y z ]
+  set current-x (current-x - x) ; suction vector added since its magnitude already reflects direction. 
+  set current-y (current-y - y)
+  set current-z (current-z - z)
+end
+;; ###########################################################################
+;; A minor utility function called by a patch to modify the current components
+;; by the specified quantity. This function is specific to currents being SUCKED
+;; into an AUV (this depends on how the calling code is written). 
+;; ###########################################################################
+to core-current-update-patch-suction [ x y z ]
+  set current-x (current-x + x) ; suction vector added since its magnitude already reflects direction. 
+  set current-y (current-y + y)
+  set current-z (current-z + z)
+end
+
+
+;; ###########################################################################
+;; Function reports a list containing the translational forces resulting from
+;; water currents that act on an AUV. 
+;; ###########################################################################
+to-report core-current-translational-forces
+  let current-force-x [current-x] of patch-here
+  let current-force-y [current-y] of patch-here
+  let current-force-z [current-z] of patch-here
+  report (list current-force-x current-force-y current-force-z)
+end
+
+
+;; ###########################################################################
+;; Calculates the rotation of an AUV due to current differentials around the AUV. 
+;; 
+;; Can only be called by an AUV. 
+;; ###########################################################################
+to-report core-current-rotational-forces
+  let torque  [current-x] of patch-at  0  1 0  ; patch farside of object
+              - [current-x] of patch-at  0 -1 0  ; patch nearside of object
+              + [current-y] of patch-at -1  0 0  ; patch left of object
+              - [current-y] of patch-at  1  0 0  ; patch right of object
+    ; DEBUG - use rotational velocity here. 
+    ;set rotational-velocity rotational-velocity + (torque * floater-mass)
+    ;if rotational-velocity < -10 [ set rotational-velocity -10 ]
+    ;if rotational-velocity >  10 [ set rotational-velocity  10 ]
+              
+    report (torque * AUV-weight)  
+end
+
+
+;; ###########################################################################
+;; DEBUG CODE
+;; 
+;; This code creates white arrows indicating the direction and magnitude of the
+;; current on each patch. 
+;; ###########################################################################
+to core-current-animate
+    
+  ask current-arrows 
+  [
+    ifelse current-x + current-y = 0
+    [ set heading 0]
+    [ set heading atan current-x current-y ]
+    ifelse current-z + (sqrt ((current-x ^ 2) + (current-y ^ 2))) = 0
+    [ set pitch 0 ]
+    [ set pitch atan current-z (sqrt ((current-x ^ 2) + (current-y ^ 2))) ]
+    
+    set size (sqrt ((current-x ^ 2) + (current-y ^ 2) + (current-z ^ 2))) 
+    if size > 1 [ set size 1]
+  ]
+  ; debug let arrows current-arrows-on (patch-set bottom-patches right-patches far-patches right-far-bottom-patch)
+  ; debug ask arrows [ set size 1 ]
+end
+
+
+;; ###########################################################################
+;; DEBUG. This code maintains some passive floating objects to observe the effects of currents
+;; on objects, and facilitates investigation of different algorithms/models.
+;; ###########################################################################
+to core-maintain-floaters
+  let floater-mass 0.5
+  ask floaters
+  [    
+    ;======= translational movement ======
+    let x-force [current-x] of patch-here
+    let y-force [current-y] of patch-here
+    let z-force [current-z] of patch-here
+    
+    set velocity-x velocity-x + (x-force / floater-mass)
+    set velocity-y velocity-y + (y-force / floater-mass)
+    set velocity-z velocity-z + (z-force / floater-mass)
+    
+    if velocity-x > 0.5  [ set velocity-x  0.5 ]
+    if velocity-x < -0.5 [ set velocity-x -0.5 ]
+    if velocity-y > 0.5  [ set velocity-y  0.5 ]
+    if velocity-y < -0.5 [ set velocity-y -0.5 ]
+    if velocity-z > 0.5  [ set velocity-z  0.5 ]
+    if velocity-z < -0.5 [ set velocity-z -0.5 ]   
+    
+    ;; providing boudaries for the tank
+   ; let new-x xcor + (floater-mass * x-motion)
+   ; let new-y ycor + (floater-mass * y-motion)
+   ; let new-z zcor + (floater-mass * z-motion) 
+    
+    let new-x xcor + velocity-x
+    let new-y ycor + velocity-y
+    let new-z zcor + velocity-z
+    
+    set xcor new-x
+    if new-x < 1
+    [ set xcor 1 ]
+    if new-x > (max-pxcor - 1)
+    [ set xcor (max-pxcor - 1) ]
+
+    set ycor new-y
+    if new-y < 1
+    [ set ycor 1 ]
+    if new-y > (max-pycor - 1) 
+    [ set ycor (max-pycor - 1) ]
+    
+    set zcor new-z
+    if new-z < 1
+    [ set zcor 1 ]
+    if new-z > (max-pzcor - 1)
+    [ set zcor (max-pzcor - 1) ]
+    
+    ;======= rotational movement ======
+    let torque  [current-x] of patch-at  0  1 0  ; patch farside of object
+              - [current-x] of patch-at  0 -1 0  ; patch nearside of object
+              + [current-y] of patch-at -1  0 0  ; patch left of object
+              - [current-y] of patch-at  1  0 0  ; patch right of object
+    
+    set rotational-velocity rotational-velocity + (torque * floater-mass)
+    if rotational-velocity < -10 [ set rotational-velocity -10 ]
+    if rotational-velocity >  10 [ set rotational-velocity  10 ]
+              
+    set heading heading + (torque * floater-mass)
+  ]
+end

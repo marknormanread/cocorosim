@@ -1,0 +1,136 @@
+
+
+to Controller-setup
+   
+
+end
+
+
+to Controller-update ; starts with the empty controller only performing the standard motion (75% forward) and keeping the AUV at a certain depth; also keeping the AUVs above the ground; also avoiding borders; also using a correlated random walk
+
+  let passive-distance-front item 0 list-of-sensor-integer-values
+  let passive-distance-right item 1 list-of-sensor-integer-values
+  let passive-distance-back item 2 list-of-sensor-integer-values
+  let passive-distance-left item 3 list-of-sensor-integer-values
+  let passive-distance-up item 4 list-of-sensor-integer-values  
+  let passive-distance-down item 5 list-of-sensor-integer-values  
+  
+  let active-distance-front item 6 list-of-sensor-integer-values  
+  let active-distance-right item 7 list-of-sensor-integer-values  
+  let active-distance-back item 8 list-of-sensor-integer-values
+  let active-distance-left item 9 list-of-sensor-integer-values  
+  
+  let distance-to-ground item 10 list-of-sensor-integer-values
+  let depth-pressure item 11 list-of-sensor-integer-values ; IMPORTANT: As of now, "depth" is the distance to the water surface (=pressure), so a higher value really means a deeper AUV.
+  let number-of-near-robots item 12 list-of-sensor-integer-values
+  
+  controller-standard-forward-motion ; simple forward motion
+  
+  ; border avoidance / correlated random walk; leads to a counter-clockwise rotation of the AUVs after a while
+  ifelse (active-distance-front > 0) ; when there is an obstacle/wall inside the frontal active sensor range
+    [ ifelse ((active-distance-front < 30) or (random-float 1.0 < 0.5))        ;; if the obstacle is very close or in 50% of random choices: 
+        [ controller-actuator-left-stop controller-actuator-right-increase ] ;; hard left; always turn hard left when close to border. 
+        [ controller-actuator-right-stop controller-actuator-left-increase ] ;; else hard right; 
+    ] 
+    [  ;; this will only execute when AUV observes nothing in front
+      ifelse (active-distance-right > 0)      ;; if AUV observes object to right
+        [controller-actuator-left-decrease]   ;; soft turn left
+        [
+          ifelse (active-distance-left > 0)   ;; if there observes object to left
+            [controller-actuator-right-decrease] ;; soft turn right
+            [
+            ; SHOALING PART: very rough, will be improved in the future
+            ifelse (passive-distance-front >= 180) [controller-actuator-left-increase controller-actuator-left-increase controller-actuator-right-decrease] ;robot ahead too near -> turn right  
+            [
+            if ((passive-distance-left > passive-distance-right) and (passive-distance-left >= 180)) [controller-actuator-left-increase controller-actuator-right-decrease] ;robot left too near    
+            if (passive-distance-right >= 180) [controller-actuator-right-increase controller-actuator-left-decrease] ;robot right too near -> turn left
+            if ((passive-distance-left > 0) and (passive-distance-left <= 120)) [controller-actuator-right-increase controller-actuator-left-decrease] ;robot left too far
+            if ((passive-distance-right > 0) and (passive-distance-right <= 120)) [controller-actuator-left-increase controller-actuator-right-decrease] ;robot right too far                                
+            if ((passive-distance-back > 0) and (passive-distance-back <= 100)) [controller-actuator-left-increase controller-actuator-left-increase controller-actuator-right-decrease] ;robot behind too far -> turn         
+            ]
+  
+            ; AGGREGATION PART:  
+            ;set color (45 + (number-of-near-robots / 12)) ; AUV changes color depending on how many other AUVs there are nearby up to integer values of 60 (60/12 = 5; 45+5=50)
+            ;if (color > 50) [controller-actuator-left-stop controller-actuator-right-stop controller-buoyancy-stay] ; if more than 60/255= 23,5% of all other AUVs-DUMMY are seen, stop
+            ;if (color > 50) [set color 65] ; keep same color if stopped
+            ]       
+        ]
+    ]     
+      
+  ; keep a certain depth
+  if (depth-pressure < 125)   [controller-buoyancy-sink] ;; (note that depth-pressure is the distance from the water surface) AUV is getting too high (or pressure too low) -> AUV should sink
+  if (distance-to-ground > 0) [controller-buoyancy-rise] ;; AUV is getting too close to the ground -> AUV should rise
+       
+end
+
+
+to controller-standard-forward-motion
+
+set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 191) ; ~75% forward speed for left thruster
+set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 191) ; ~75% forward speed for right thruster
+
+end
+
+
+to controller-actuator-left-increase
+  
+set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values (item 0 list-of-actuator-integer-values + 20)) ; increase forward speed for left thruster  
+  
+end
+
+
+to controller-actuator-right-increase
+  
+set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values (item 1 list-of-actuator-integer-values + 20)) ; increase forward speed for right thruster    
+  
+end
+
+
+to controller-actuator-left-decrease
+  
+set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values (item 0 list-of-actuator-integer-values - 20)) ; increase forward speed for left thruster  
+  
+end
+
+
+to controller-actuator-right-decrease
+  
+set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values (item 1 list-of-actuator-integer-values - 20)) ; increase forward speed for right thruster    
+  
+end
+
+
+
+to controller-actuator-left-stop
+  
+set list-of-actuator-integer-values (replace-item 0 list-of-actuator-integer-values 0) ; set forward speed for left thruster to 0    
+  
+end
+
+
+to controller-actuator-right-stop
+  
+set list-of-actuator-integer-values (replace-item 1 list-of-actuator-integer-values 0) ; set forward speed for right thruster to 0
+  
+end
+
+
+to controller-buoyancy-sink
+  
+set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values 77) ; set buoyancy to sink at half speed
+  
+end
+
+
+to controller-buoyancy-rise
+  
+set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values 177) ; set buoyancy to rise at half speed
+  
+end
+
+
+to controller-buoyancy-stay
+  
+set list-of-actuator-integer-values (replace-item 2 list-of-actuator-integer-values 127) ; set buoyancy to rise at half speed
+  
+end 

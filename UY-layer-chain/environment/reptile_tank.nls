@@ -1,0 +1,15 @@
+
+
+
+to setup-environment
+  show "setting up UY reptile tank."
+  resize-world -40 40 -10 10 0 20
+  
+end
+
+
+to setup-environment-dimensions
+  show "setting up UY reptile tank."
+  resize-world -40 40 -10 10 0 20
+  
+end

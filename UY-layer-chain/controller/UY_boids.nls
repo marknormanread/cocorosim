@@ -1,0 +1,464 @@
+;;====================================================
+;;====================================================
+;;
+;; UY's implementation of BIODS. 
+;; 
+;; In boids, each boid follows the following three rules:
+;; 1) Collision avoidance, avoid collisions with nearby objects
+;; 2) Velocity matching, try to match velocity with nearby boids. 
+;; 3) Flock centering, try to stay close to nearby boids. 
+;;
+;; Orginal boids implementation found on this webpage: http://www.red3d.com/cwr/boids/
+;;
+;;====================================================
+;;====================================================
+
+
+globals 
+[
+    ;;------------------------------------------------------------------
+    ;; These variables are directly related to algorithmic performance.
+  boids-cohesion-weight           ;; how much weight is given to trying to turn into swarm center when calculating boid movement
+  boids-separation-weight         ;; how much weight is given to trying to avoid other boids when calculating boid movement
+  boids-alignment-weight          ;; how much weight is given to tyring to match velocity with other boids when calculating boid movement
+  boids-separation-threshold           ;; in terms of sensor readings, the distance at which this AUV attempts to avoid others around it. 
+
+  boids-forward-movement-bias         ;; to make the swarm move around, when calculating boid movement, this dictates a preference for moving forward.
+  boids-movement-bias                 ;; high values are added to desired spee, making AUVs move more 'aggressively'
+  boids-observe-backwards             ;; true or false, this dictates whether the backwards facing sensor is used in calculating vectors
+  boids-max-sensor-scaling            ;; maximum scaling factor for the influence of sensors facing, expressed for those facing directly ahead.
+  boids-min-sensor-scaling            ;; minimum scaling factor for the influence of sensors facing, this one calculated for directly behind. 
+  
+  boids-turn-gain                  ;; the speed with which boids turn to their desired directions. This interfaces with the OS arc function.
+  ;;------------------------------------------------------------------
+]
+ 
+turtles-own 
+[     
+   ;; these variables comprise a vector indicating the perceived center of the swarm, relative to the current AUV
+   cohesion-sideways ;; positive numbers are right, negative are left
+   cohesion-forward  ;; positive numbers are forward, negative are back
+   cohesion-up       ;; positive numbers are up, negative are down. 
+   
+   ;; these variables comprise a vector of prefered movement to avoid hitting other AUVs. 
+   separation-sideways
+   separation-forward
+   separation-up
+   
+   ;; these variables comprise a vector of preferred movement to match the velocity of other AUVs seen around it (through blue light sensors)
+   alignment-sideways
+   alignment-forward
+   alignment-up
+   
+   ;; part of the match velocity rule. these variables are used to store the previous sensor readings. 
+   ;; They are used to calculate differences in sensor outputs, hence whether objects are approaching or departing.
+   prev-boid-distance-front
+   prev-boid-distance-back
+   prev-boid-distance-right
+   prev-boid-distance-left
+   prev-boid-distance-up
+   prev-boid-distance-down
+   
+   ;; part of the match-velocity rule. These linked lists store the last 10 difference readings on each sensor. They are used to mitigate sensor noise. 
+   alignment-differences-front
+   alignment-differences-back
+   alignment-differences-right
+   alignment-differences-left
+   alignment-differences-up
+   alignment-differences-down
+
+   ;; these hold scalar values (0.0 - 1.0) by which to reduce the magnitude of influence that certain sensors have on AUV movement.
+   sensor-scale-front
+   sensor-scale-right
+   sensor-scale-left
+   sensor-scale-back
+   sensor-scale-up
+   sensor-scale-down
+
+   swarm-in-range         ;; used to indicate when the swarm is sensed within range. AUVs may remain stationary under two conditions, 
+                          ;; the swarm-related forces acting upon it dictate that it should remain so, or it cannot perceive any of the swarm, 
+                          ;; and so remains still. In the latter case, this variable is set to ensure the AUV moves. 
+   swarm-in-range-data-collection
+]
+
+
+
+
+;;========================================================
+;; Called by the OS to step the controller. 
+;;========================================================
+to Controller-update
+  
+    ;; retrieve all sensor information in integers. Ordinarily high values from the sensors indicate something that is very close. 
+    ;; 255 is the largest value that can be returned, and subtracting sensor values from 255 translates large numbers into large
+    ;; distances. This is more useful for calculating which direction the swarm lies in, since otherwise large distances between
+    ;; elements in the swarm translate into small vectors of desired direction. 
+  let distance-front OS_sens_BL_front
+  let distance-right OS_sens_BL_right
+  let distance-back  OS_sens_BL_back
+  let distance-left  OS_sens_BL_left
+  let distance-up    OS_sens_BL_up
+  let distance-down  OS_sens_BL_down
+  
+  ;; the three rules of boids give relative vector in which the current AUV should try to move. 
+  calculate-cohesion     distance-front distance-back distance-right distance-left distance-up distance-down ;; calculate center of swarm
+  calculate-separation   distance-front distance-back distance-right distance-left distance-up distance-down boids-separation-threshold ;; calculate small distance from other AUVs
+  calculate-alignment    distance-front distance-back distance-right distance-left distance-up distance-down  ;; match velocities. 
+
+
+  ;; take averages, and normalise
+  let collective-forward (( (boids-cohesion-weight   * cohesion-forward  ) 
+                          + (boids-separation-weight * separation-forward) 
+                          + (boids-alignment-weight  * alignment-forward )) 
+                          /  (boids-cohesion-weight + boids-separation-weight + boids-alignment-weight)) 
+  let collective-sideways ((  (boids-cohesion-weight   * cohesion-sideways  ) 
+                            + (boids-separation-weight * separation-sideways) 
+                            + (boids-alignment-weight  * alignment-sideways )) 
+                            / (boids-cohesion-weight + boids-separation-weight + boids-alignment-weight))
+  
+  let collective-up   ((  (boids-cohesion-weight * cohesion-up) 
+                         + (boids-separation-weight * separation-up) 
+                         + (boids-alignment-weight * alignment-up)) 
+                         /  (boids-cohesion-weight + boids-separation-weight + boids-alignment-weight)) 
+
+  ifelse swarm-in-range = false            ;; default is to move forwards at a reasonable pace if there is no swarm in range. 
+  [ set collective-forward 25 set color red ]
+  [ set color yellow ]
+  
+  let desired-heading calculate-desired-heading (collective-forward + boids-forward-movement-bias) collective-sideways  ;; This should be relative to the AUV
+  let desired-speed   calculate-desired-speed (collective-forward + boids-forward-movement-bias) collective-sideways
+
+  OS_movement_arc (OS_orient_rel_to_abs_heading desired-heading) (boids-movement-bias + desired-speed) boids-turn-gain
+ 
+    ;; ensuring that values passed to buoyancy actuators do not exceed sensible values
+  set collective-up collective-up * 0.05
+  OS_buoyancy_set_speed collective-up  
+   
+end
+
+
+;;====================================================
+;; Calculates a scalar by which the influence of data from a particular sensor on AUV movement is reduced in magnitude
+;; based on the angle that the sensor points away from directly-forwards on the AUV. This is supplied by sensor-heading.
+;; Hence, sensor-heading is the angle between the vector pointing forwards on the AUV and the vector along which the
+;; sensor points. It should range between 0 and 180 degrees, but can handle negative values if needed.  
+;;====================================================
+to-report scale-sensor-influence-heading [ sensor-heading ]
+  let range boids-max-sensor-scaling - boids-min-sensor-scaling 
+
+    ;; sensor heading will be between -180 and 180. Taking the asbsolute deals with both cases. 
+  report (((180 - abs sensor-heading) / 180) * range) + boids-min-sensor-scaling
+end
+
+
+;;====================================================
+;; projects vector of given magnitude, heading and pitch onto the vector along which an AUV points. 
+;; The projection can be scaled by the given scalar. 
+;;   sensor-heading - heading of vector relative to AUV
+;;   sensor-pitch   - pitch of vector relative to AUV
+;;   scale-factor   - the projection is multiplied by this factor
+;;   sensor-reading - the magnitude of the vector
+;;
+;; Note that a heading of 0 points in the same direction of the AUV, and a pitch of 90 points stright upwards. 
+;;====================================================
+to-report project-forward [ sensor-heading sensor-pitch scale-factor sensor-reading ]
+  report (cos sensor-pitch) * (cos sensor-heading) * sensor-reading * scale-factor
+end
+
+;;====================================================
+;; projects vector of given magnitude, heading and pitch onto the vector sideways to where the AUV points (left to right). 
+;; The projection can be scaled by the given scalar. 
+;;   sensor-heading - heading of vector relative to AUV
+;;   sensor-pitch   - pitch of vector relative to AUV
+;;   scale-factor   - the projection is multiplied by this factor
+;;   sensor-reading - the magnitude of the vector
+;;
+;; Note that a heading of 0 points in the same direction of the AUV, and a pitch of 90 points stright upwards. 
+;;====================================================
+to-report project-sideways [ sensor-heading sensor-pitch scale-factor sensor-reading ]
+  report (cos sensor-pitch) * (sin sensor-heading) * sensor-reading * scale-factor
+end
+
+
+;;====================================================
+;; projects vector of given magnitude, heading and pitch onto the vector upwards with respect to where the AUV points. 
+;; The projection can be scaled by the given scalar. 
+;;   sensor-heading - heading of vector relative to AUV
+;;   sensor-pitch   - pitch of vector relative to AUV
+;;   scale-factor   - the projection is multiplied by this factor
+;;   sensor-reading - the magnitude of the vector
+;;
+;; Note that a heading of 0 points in the same direction of the AUV, and a pitch of 90 points stright upwards. 
+;;====================================================
+to-report project-up [ sensor-heading sensor-pitch scale-factor sensor-reading ]
+  report (sin sensor-pitch) * sensor-reading * scale-factor
+end
+
+;;====================================================
+;; Calculates the center of the swarm, based on the intensities of blue light readings around the AUV.
+;;====================================================
+to calculate-cohesion [ distance-front distance-back distance-right distance-left distance-up distance-down ]
+  let noise-threshold OS_bluelight_range * 0.95  ;; thresholding to avoid undesirable influence of sensor noise.   
+  
+  ;; distance indicators indicate maximum when there is nothing perceived. Thresholding places the center of the swarm on this AUV where that is the case. 
+  if distance-front > noise-threshold  [  set distance-front 0  ]
+  if distance-back  > noise-threshold  [  set distance-back  0  ]
+  if distance-right > noise-threshold  [  set distance-right 0  ] 
+  if distance-left  > noise-threshold  [  set distance-left  0  ]  
+  if distance-up    > noise-threshold  [  set distance-up    0  ]
+  if distance-down  > noise-threshold  [  set distance-down  0  ]
+    
+  set cohesion-forward project-forward  ;; based on what sensor observation and orientation, project onto forward-axis (relative to robot)
+                       (item 3 (item 0 list-of-sensor-descriptions))   ;; retrieve forward sensor heading
+                       (item 4 (item 0 list-of-sensor-descriptions))   ;; retrieve forward sensor pitch
+                       sensor-scale-front distance-front  
+                       
+  if boids-observe-backwards    ;; currently AUVs do not use information about the swarm behind them to calculate center.
+  [ set cohesion-forward (cohesion-forward 
+                               + project-forward (item 3 (item 2 list-of-sensor-descriptions))   ;; retrieve forward sensor heading
+                                                 (item 4 (item 2 list-of-sensor-descriptions))   ;; retrieve forward sensor pitch
+                                                 sensor-scale-back distance-back
+                             )
+  ]
+  set cohesion-sideways 
+                       project-sideways (item 3 (item 1 list-of-sensor-descriptions)) 
+                                        (item 4 (item 1 list-of-sensor-descriptions)) 
+                                        sensor-scale-right distance-right 
+                     + project-sideways (item 3 (item 3 list-of-sensor-descriptions)) 
+                                        (item 4 (item 3 list-of-sensor-descriptions)) 
+                                        sensor-scale-left distance-left
+  set cohesion-up      project-up (item 3 (item 4 list-of-sensor-descriptions)) 
+                                  (item 4 (item 4 list-of-sensor-descriptions)) 
+                                  sensor-scale-up distance-up 
+                     + project-up (item 3 (item 5 list-of-sensor-descriptions)) 
+                                  (item 4 (item 5 list-of-sensor-descriptions)) 
+                                  sensor-scale-down distance-down
+  
+  ;show (word "coh-forward " cohesion-forward " coh-side " cohesion-sideways " coh-up " cohesion-up)
+  ;show (word "front " distance-front  " right " distance-right " left " distance-left " back " distance-back " up  " distance-up " down " distance-down)
+  
+  ;; used to calculate whether any other swarm member is perceived. If it is not, then symmetry must be broken by forcing this AUV forward. 
+  ifelse distance-front = 0 and distance-right = 0 and distance-left = 0 and distance-up = 0 and distance-down = 0 and distance-back = 0
+  [  set swarm-in-range false  ]
+  [  set swarm-in-range true  ]
+end
+
+
+;;====================================================
+;; Calculates which direction the AUV should move in to best avoid hitting other AUVs around it, based on the supplied threshold
+;;====================================================
+to calculate-separation [ distance-front distance-back distance-right distance-left distance-up distance-down threshold ]
+ 
+  set separation-sideways 0
+  set separation-forward 0
+  set separation-up 0
+  
+  ;; statements that check if AUV distance is closer than threshold. (remember, close = high numbers from sensors)
+  ;; If this is the case, then the distance (where 0 is just inside threshold, large = very close!) is calculated,
+  ;; and turned into part of a vector dictating which way the AUV should try to move. 
+  ;; Infringements of AUVs closer than the threshold should result in the AUV moving away. As such, the projected 
+  ;; vector is SUBTRACTED from the avoidance-vector as it is compiled (rather than summed, as elsewhere).
+  if distance-front < threshold
+  [  set separation-forward separation-forward - 
+         project-forward (item 3 (item 0 list-of-sensor-descriptions)) 
+                         (item 4 (item 0 list-of-sensor-descriptions)) 
+                         sensor-scale-front (threshold - distance-front)  
+  ] ; try to move backwards if there is something in front
+  if boids-observe-backwards
+  [ 
+    if distance-back < threshold 
+    [  set separation-forward (separation-forward -
+          project-forward (item 3 (item 2 list-of-sensor-descriptions)) 
+                          (item 4 (item 2 list-of-sensor-descriptions )) 
+                          sensor-scale-back (threshold - distance-back))  
+    ]
+  ]
+     
+  if distance-right < threshold
+  [  set separation-sideways separation-sideways -
+           project-sideways (item 3 (item 1 list-of-sensor-descriptions)) 
+                            (item 4 (item 1 list-of-sensor-descriptions)) 
+                            sensor-scale-right (threshold - distance-right)  
+  ] ; try to move left if there is something to the right
+  if distance-left < threshold
+  [  set separation-sideways separation-sideways - 
+           project-sideways (item 3 (item 3 list-of-sensor-descriptions)) 
+                            (item 4 (item 3 list-of-sensor-descriptions)) 
+                            sensor-scale-left (threshold - distance-left)  
+  ] ; try to move right if there is something to the left
+  
+  if distance-up < threshold
+  [  set separation-up separation-up - 
+      project-up (item 3 (item 4 list-of-sensor-descriptions)) 
+                 (item 4 (item 4 list-of-sensor-descriptions)) 
+                 sensor-scale-up (threshold - distance-up) 
+  ] ; try to move down if there is something above. 
+  if distance-down < threshold
+  [  set separation-up separation-up - 
+      project-up (item 3 (item 5 list-of-sensor-descriptions)) 
+                 (item 4 (item 5 list-of-sensor-descriptions)) 
+                 sensor-scale-down (threshold - distance-down)
+  ] 
+end
+  
+
+;;====================================================
+;; calculates the components of vector to best match velocity with things perceived by sensors. It operates on whether the sensors detect something approaching
+;; or departing, and attempts to maintain the distance observed by the sensors. Where several sensors observe objects, the individual vectors are summed. 
+;;
+;; The procedure requires that the last set of readings be recorded, and these are used to calculate the differential with the current readings. To avoid
+;; problems arising from sensor noise, a number of differentials are used when calculating vectors. These are stored in a linked list, with new readings 
+;; added to the front and old readings dropped off the back of the list. Since the differences cover a number of readings, their sum is used in calculating 
+;; vectors, rather than their averages. 
+;;====================================================
+to calculate-alignment [ distance-front distance-back distance-right distance-left distance-up distance-down ]
+  
+    ;; if current reading is 10, previous was 50, then we are approaching something, and should slow down. 
+  let diff-front (distance-front - prev-boid-distance-front)
+  let diff-back  (distance-back - prev-boid-distance-back)
+  let diff-right (distance-right - prev-boid-distance-right)
+  let diff-left  (distance-left - prev-boid-distance-left)
+  let diff-up    (distance-up - prev-boid-distance-up)
+  let diff-down  (distance-down - prev-boid-distance-down)
+  
+  ;; add diff-fronts to front of lists
+  set alignment-differences-front fput diff-front alignment-differences-front 
+  set alignment-differences-back  fput diff-back  alignment-differences-back
+  set alignment-differences-right fput diff-right alignment-differences-right
+  set alignment-differences-left  fput diff-left  alignment-differences-left
+  set alignment-differences-up    fput diff-up    alignment-differences-up
+  set alignment-differences-down  fput diff-down  alignment-differences-down
+
+    ;; drop the last element from the end of the list
+  set alignment-differences-front  but-last alignment-differences-front  
+  set alignment-differences-back   but-last alignment-differences-back
+  set alignment-differences-right  but-last alignment-differences-right
+  set alignment-differences-left   but-last alignment-differences-left 
+  set alignment-differences-up     but-last alignment-differences-up
+  set alignment-differences-down   but-last alignment-differences-down
+    
+    ;; the vector is taken as the sum of 10 difference measures
+  set alignment-forward project-forward (item 3 (item 0 list-of-sensor-descriptions)) 
+                                        (item 4 (item 0 list-of-sensor-descriptions)) 
+                                        sensor-scale-front (sum alignment-differences-front)
+  if boids-observe-backwards                                      ;; do this only if readings from backwards facing sensor are taken into account.
+  [  set alignment-forward (cohesion-forward + 
+              project-forward  (item 3 (item 2 list-of-sensor-descriptions)) 
+                               (item 4 (item 2 list-of-sensor-descriptions)) 
+                               sensor-scale-back (sum alignment-differences-back))  
+  ]
+  set alignment-sideways 
+              project-sideways (item 3 (item 1 list-of-sensor-descriptions)) 
+                               (item 4 (item 1 list-of-sensor-descriptions)) 
+                               sensor-scale-right ((sum alignment-differences-right) 
+            + project-sideways (item 3 (item 3 list-of-sensor-descriptions)) 
+                               (item 4 (item 3 list-of-sensor-descriptions)) 
+                               sensor-scale-left (sum alignment-differences-left)) ;; scale down sideways movement. 
+  set alignment-up 
+              project-up (item 3 (item 4 list-of-sensor-descriptions)) 
+                         (item 4 (item 4 list-of-sensor-descriptions)) 
+                         sensor-scale-up (sum alignment-differences-up) 
+            + project-up (item 3 (item 5 list-of-sensor-descriptions)) 
+                         sensor-scale-down (item 4 (item 5 list-of-sensor-descriptions)) (sum alignment-differences-down)
+  
+    ;; record current readings for use next time.     
+  set prev-boid-distance-front  distance-front
+  set prev-boid-distance-back   distance-back
+  set prev-boid-distance-right  distance-right
+  set prev-boid-distance-left   distance-left
+  set prev-boid-distance-up     distance-up
+  set prev-boid-distance-down   distance-down
+end
+
+
+
+;;====================================================
+;; basic trigonometry, will calculate the magnitude of the desired velocity (the speed) in the horrizontal plane
+;;====================================================
+to-report calculate-desired-speed [ collective-forward collective-sideways ]
+  report sqrt ((collective-forward ^ 2) + (collective-sideways ^ 2))
+end
+
+;;====================================================
+;; basic trigonometry, will calculate the heading of the desired heading of the AUV, relative to the direction in which the AUV faces
+;;====================================================
+to-report calculate-desired-heading [ collective-forward collective-sideways ]
+  if collective-forward = 0 and collective-sideways = 0
+  [ report 0 ] ;; default to straight ahead
+  report atan collective-sideways collective-forward
+end
+
+
+
+;;====================================================
+;; Called by every AUV to set up. 
+;;====================================================
+to Controller-setup
+  ;;-----------------------------------------
+  ;; these variables concern algorithmic performance.
+  set boids-cohesion-weight   1.0
+  set boids-separation-weight 1.0
+  set boids-alignment-weight  0.0
+  
+  set boids-separation-threshold 0.6       ;; in terms of sensor readings, the distance at which this AUV attempts to avoid others around it. 
+  
+  set boids-forward-movement-bias 0        ;; a component when calculating desired heading, this points in the direction that the AUV faces
+  set boids-movement-bias 10                ;; added to desired speed to make AUVs move more 'aggressively' 
+  set boids-observe-backwards true
+  set boids-max-sensor-scaling 1.0
+  set boids-min-sensor-scaling 1.0
+  
+  set boids-turn-gain 5.0
+  ;;-----------------------------------------
+  
+  set cohesion-sideways 0 ;; positive numbers are right, negative are left
+  set cohesion-forward 0  ;; positive numbers are forward, negative are back
+  set cohesion-up 0       ;; positive numbers are up, negative are down. 
+   
+  set separation-sideways 0
+  set separation-forward 0
+  set separation-up 0 
+   
+  set alignment-sideways 0
+  set alignment-forward 0
+  set alignment-up 0
+  
+  set alignment-differences-front (list 0 0 0 0 0  0 0 0 0 0) ;; initialise the velocity matching linked lists with zeros. 
+  set alignment-differences-back  (list 0 0 0 0 0  0 0 0 0 0)
+  set alignment-differences-right (list 0 0 0 0 0  0 0 0 0 0)
+  set alignment-differences-left  (list 0 0 0 0 0  0 0 0 0 0)
+  set alignment-differences-up    (list 0 0 0 0 0  0 0 0 0 0)
+  set alignment-differences-down  (list 0 0 0 0 0  0 0 0 0 0)
+  
+  ;;-----------------------------------------
+  ;; to prevent artifacts arising from AUVs suddenly appearing much closer (because nothing was observed upon AUV initialisation)
+  ;; the match-velocities boids rule is called 10 times. This populates the array responsible for differences in boid-distance
+  ;; perception with more accurate values.
+  let distance-front OS_sens_BL_front
+  let distance-right OS_sens_BL_right
+  let distance-back  OS_sens_BL_back
+  let distance-left  OS_sens_BL_left
+  let distance-up    OS_sens_BL_up
+  let distance-down  OS_sens_BL_down
+  repeat 15
+  [
+    calculate-alignment distance-front distance-back distance-right distance-left distance-up distance-down
+  ]
+  ;;-----------------------------------------  
+  
+  set swarm-in-range true
+  set swarm-in-range-data-collection true
+  
+  ;;-----------------------------------------
+  ;; calculate the scalars for reducing the magnitude of influence that sensors pointing in various directions
+  ;; around the AUV have on its eventual movement. For this simple case, 6 sensors that all point in orthogonal directions,
+  ;; this is relatively trivial to calculate. However, it is here as a template for less trivial sensor configurations
+  ;; that may be used down the line.
+  set sensor-scale-front   scale-sensor-influence-heading (angle-between-vectors 1 0 0   1  0  0)
+  set sensor-scale-right   scale-sensor-influence-heading (angle-between-vectors 1 0 0   0  1  0)
+  set sensor-scale-left    scale-sensor-influence-heading (angle-between-vectors 1 0 0   0 -1  0) 
+  set sensor-scale-back    scale-sensor-influence-heading (angle-between-vectors 1 0 0  -1  0  0)
+  set sensor-scale-up      scale-sensor-influence-heading (angle-between-vectors 1 0 0   0  0  1)
+  set sensor-scale-down    scale-sensor-influence-heading (angle-between-vectors 1 0 0   0  0 -1)
+  ;;-----------------------------------------
+end

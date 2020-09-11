@@ -1,0 +1,1034 @@
+;;======================================================
+;; Controller created by UY (in case you have any questions). 
+;; Controller is responsible for relay chain formation
+;;======================================================
+
+__includes[
+  "../controller/UY-chain-shoal.nls"
+]
+  
+globals
+[
+  explore-recruitable-threshold    ;; minimum number of neighbours required for AUV to be recruitable. IE, if set to 2, then an AUV with 2 or 3 or more neighbours is recruitable  
+  chain-slack-threshold  ;; interpreted on BL. This is the distance to other links in the chain at which this AUV decides to leave  
+  chain-stress-threshold ;; interpreted on BL, this is the distance at which AUV gets stressed  
+]
+
+
+turtles-own
+[
+  ;;------------------------------  
+  ;; states of the finite state machine. At a top level, AUVs are in one of the following states:
+  ;; 'chain'     - a member of the relay chain. This includes end-links, even though they are also members of the explore shoal
+  ;; 'chain-nav' - navigating the chain to find either the explore shoal or a recruiter. These AUVs avoid collisions with eachother and the chain
+  ;; 'nlink'     - AUVs has found the recruiter and is trying to move into position. 
+  ;; 'explore'   - the exploratory shoal to which the chain is connected
+  chain-alg-state           ;; 'chain', 'explore', 'chain-nav', 'nlink'
+  ;;------------------------------  
+
+  chain-recruit-state       ;; 'agent', 'recruiter', 'none'. Recruiter knows where new AUV should be located. Agents know that there is a recruiter in the chain, and in which direction
+  chain-nav-target        ;; chain navigation shoalers are either seeking the 'recruiter' or the 'explore' shoal  
+  
+  chain-recruiter-ndepth      ;; depth for next link in the chain
+  chain-recruiter-ndist       ;; horizontal distance that the next link should be from the recruiter
+  chain-recruiter-nheading    ;; horizontal heading that the next link should be from the recruiter
+  chain-recruitment-direction ;; "next" ,"prev" or "none" - the direction along the chain at which a recruiter lies
+  
+  chain-link-default-depth            ;; the ideal difference in depth from the previous link AUV. Only applies if there is no next link.
+  chain-link-default-hor-distance     ;; the ideal distance of the previous link from the current link in the chain. Only applies if there is no next link.
+  chain-link-default-heading          ;; the ideal heading to the previous link from the current link in the chain. Only applies if there is no next link.
+
+  chain-prev-id                       ;; IDs previous and next AUVs in the chain
+  chain-prev-depth        ;; the actual heading and differences in depth at which the prev link in the chain is observed at. 
+  chain-prev-heading
+  chain-prev-distance     ;; distance in 3D - not just horizontal distance
+  chain-prev-hor-distance ;; distance in horizontal plane
+
+  chain-next-id                    
+  chain-next-depth        ;; the actual heading and differences in depth at which the next link in the chain is observed at. 
+  chain-next-heading
+  chain-next-distance     ;; distance in 3D - not just horizontal distance
+  chain-next-hor-distance ;; distance in horizontal plane
+
+  chain-motion-up         ;; used for manipulating the shoaling algorithm
+  chain-motion-forwards
+  chain-motion-sideways   
+  
+  heading-to-location  
+]
+
+
+
+
+to controller-setup
+  controller-setup-parameters-chain
+  
+  chain-become-explore 
+  
+  set explore-recruitable-threshold recruitable-threshold       
+  
+  set chain-recruit-state "none"
+  set chain-recruitment-direction "none"
+  
+  set chain-next-id -1
+  set chain-prev-id -1
+  
+  set chain-slack-threshold   0.3 * OS_bluelight_range
+  set chain-stress-threshold  0.6 * OS_bluelight_range
+
+  controller-setup-chain-shoal
+end
+
+
+;;======================================================
+;; 
+;;======================================================
+to controller-update
+
+  set chain-motion-up 0 
+  set chain-motion-forwards 0
+  set chain-motion-sideways 0
+
+  ;;--------------------------------
+  ;; process chain navigation shoal
+  if chain-alg-state = "chain-nav"  
+  [ set color orange 
+        
+    ;; if there is no sign of the chain seeking new links, then try to find the explore shoal.
+    if     (not any? OS_sens_auvs_RF with [chain-recruit-state = "recruiter"])
+       and (not any? OS_sens_auvs_RF with [chain-recruit-state = "agent"])
+    [ set chain-nav-target "explore" ]
+    
+    ;; navigate the chain to find the explore shoal
+    if chain-nav-target = "explore"
+    [
+      ;; look for the furthest link, but exclude the end link. This must be seen over BL, and then the chain-nav becomes an nlink or exploratory auv. 
+      let furthest chain-furthest-link neighbours-RF with [chain-alg-state = "chain" and not exploratory-auv? self]
+      
+      if furthest != nobody
+      [
+        let target-heading [chain-next-heading] of furthest    ;; find location of next link in the chain
+        let target-depth   [chain-next-depth]   of furthest
+    
+        ;; convert directions to the next link into relative motion, to influence shoaling
+        set chain-motion-forwards cos OS_orient_abs_to_rel_heading target-heading
+        set chain-motion-sideways sin OS_orient_abs_to_rel_heading target-heading          
+        set chain-motion-up chain-motion-up + (target-depth - OS_sens_pressure)   ;; move towards the correct depth
+      ] 
+    ]
+    
+    ;; if chain-nav can see a single explorer on BL, then it becomes an explorer too
+    if chain-nav-target = "explore" and (any? OS_sens_auvs_BL with [exploratory-auv? self])  
+    [ chain-become-explore ]    
+  ]
+  ;;--------------------------------
+
+  if chain-alg-state = "explore"
+  [ 
+    set color yellow  
+    if OS_sens_active_down >= OS_active_bluelight_range ;; can't see the bottom
+    [
+      set chain-motion-up chain-motion-up - 0.015       ;; sink towards the bottom
+    ]    
+  ]
+
+  ;;--------------------------------
+  ;; this covers all chain-nav shoal members, and explore shoal members that are recruitable
+  if (chain-recruitable? self)
+  [     
+    let neighbours-BL OS_sens_auvs_BL    
+    
+    ifelse (any? neighbours-BL with [chain-recruit-state = "recruiter"])
+    [ chain-become-nlink ]        ;; respond to recruiter by becoming prospective new link
+    [ 
+      if (any? neighbours-BL with [chain-recruit-state = "agent"])  ;; can't see recruiter directly, but chain requires new link elsewhere
+      [  ;; within range of an agent, get directions to the recruiter and follow them
+        if chain-alg-state != "chain-nav" [ chain-become-chain-nav ]       ;; start navigating the chain
+        set chain-nav-target "recruiter"     ;; navigating the chain to find the recruiter
+        
+        let recruiter-heading     0          ;; where the next step along the chain to the recruiter lies
+        let recruiter-depth       0
+
+          ;; may be several agents in sight, this finds the one closest to the end of the chain
+        let furthest chain-furthest-link neighbours-BL with [chain-recruit-state = "agent"]         
+        if [chain-recruitment-direction] of furthest = "next"
+        [
+          set recruiter-heading  [chain-next-heading] of furthest  ;; links know the (rough) heading to and depth of next links
+          set recruiter-depth    [chain-next-depth]   of furthest
+        ]
+        if [chain-recruitment-direction] of furthest = "prev"
+        [
+          let nearest chain-nearest-link neighbours-BL with [chain-recruit-state = "agent"]
+          set recruiter-heading  [chain-prev-heading] of nearest   ;; links know the (rough) heading to and depth of next links
+          set recruiter-depth    [chain-prev-depth]   of nearest          
+        ]
+                       
+        ;; convert directions to the recruiter into relative motion, to influence shoaling
+        set chain-motion-forwards cos OS_orient_abs_to_rel_heading recruiter-heading
+        set chain-motion-sideways sin OS_orient_abs_to_rel_heading recruiter-heading 
+        set chain-motion-up chain-motion-up + (recruiter-depth - OS_sens_pressure)  ;; move to the correct depth
+      ]
+    ]    
+  ]
+  ;;--------------------------------
+    
+  ;;--------------------------------
+  ;; an AUV that is being recruited as a link in the chain, but has not get become a chain member. It is being directed
+  ;; to the appropriate location, and should be within bluelight range of the chain
+  if chain-alg-state = "nlink"
+  [ 
+    set color red
+    
+    let neighbours OS_sens_auvs_BL    
+    let rec one-of neighbours with [chain-recruit-state = "recruiter"]
+    ifelse rec = nobody
+    [ 
+      chain-become-chain-nav            ;; if communication with chain is lost, or recruitment completed then go back to shoaling
+      set chain-nav-target "explore"
+    ]               
+    [ ;; get the intended depth of the new link from the recruiter
+      set chain-link-default-depth        [chain-recruiter-ndepth] of rec  
+      set chain-link-default-heading      [(chain-recruiter-nheading + 180) mod 360] of rec  ;; heading from perspective of rec, correct for this 
+      set chain-link-default-hor-distance [chain-recruiter-ndist] of rec
+            
+      if chain-link-default-depth < OS_sens_pressure     ;; if next link is down
+      [ set chain-motion-up chain-motion-up - abs (chain-link-default-depth - OS_sens_pressure) ]
+      if chain-link-default-depth > OS_sens_pressure     ;; if next link is up
+      [ set chain-motion-up chain-motion-up + abs (chain-link-default-depth - OS_sens_pressure) ]
+          
+      let return-list (chain-nlink-position rec)  ;; influence movement such that nlink gets into appropriate position
+      let in-position? item 0 return-list
+      ;let heading-to-location item 1 return-list TODO HERE
+      let speed-to-location item 2 return-list
+      
+            ;; convert directions to the next link into relative motion, to influence shoaling
+      set chain-motion-forwards cos OS_orient_abs_to_rel_heading heading-to-location
+      set chain-motion-sideways sin OS_orient_abs_to_rel_heading heading-to-location
+                  
+      if in-position?
+      [ 
+        chain-become-chain
+        
+        if [chain-recruitment-direction] of rec = "next"
+        [ 
+          set chain-prev-id [who] of rec          ;; record the ID of previous link in the chain
+          let previous-next [chain-next-id] of rec
+          if (previous-next != -1)                ;; link up the rest of the chain. TODO - what if the next ID isn't in the neighbourhood or cant be seen on BL?
+          [ 
+            set chain-next-id previous-next 
+            ask turtle chain-next-id [ set chain-prev-id [who] of myself ]   ;; tell the next link that this AUV is now the previous link
+          ]
+        ]
+        if [chain-recruitment-direction] of rec = "prev"
+        [ 
+          set chain-next-id [who] of rec         ;; record the ID of next link in the chain
+          let previous-prev [chain-prev-id] of rec
+          if (previous-prev != -1)
+          [
+            set chain-prev-id previous-prev
+            ask turtle chain-prev-id [ set chain-next-id [who] of myself ]   ;; tell the prev link that this AUV is now the next link
+          ]
+        ]
+
+          ;; tell the recruiter that recruitment can terminate, and give it the ID of the nlink. 
+        ask rec [ chain-recruiter-stop [who] of myself ]   
+      ]      
+    ]
+  ]
+  ;;--------------------------------
+  
+  ;; perform motion for AUVs in shoaling-based states
+  if chain-alg-state = "chain-nav" or chain-alg-state = "explore" or chain-alg-state = "nlink"
+  [ controller-chain-shoal-update ]
+  
+  ;; perform motion for chain AUVs, and maintenance of the chain itself
+  if chain-alg-state = "chain"
+  [ 
+    set color sky         
+    if chain-middle-link? [   set color black    ]
+    chain-update-link-info
+ 
+    ;;--------------------------------  
+    if chain-middle-link?                    ;; if this link is a middle link
+    [ 
+      chain-link-length-maintenance-middle   ;; handles stress and slack for middle links in the chain
+      chain-link-motion-control-middle       ;; maintain position in the chain
+    ] 
+    ;;--------------------------------  
+   
+    ;;--------------------------------
+    if chain-end-link? and not chain-start-link?   ;; a link in a chain of length 1 can be both start and end
+    [ 
+      let chain-shoaling true
+
+      if chain-stress-test                         ;; is end link stressed?
+      ;  and (chain-recruit-state = "none")        ;; and must not already be recruiting, or witness to recruitment elsewhere in chain    
+      [
+        ifelse (any? OS_sens_auvs_RF with [chain-recruitable? self])
+        [  ;; possible to recruit another AUV into the chain
+          let default-distance (0.3 * OS_bluelight_range)
+          let next-depth ((OS_sens_pressure - chain-prev-depth) / 2) + OS_sens_pressure
+          chain-recruit-next ((chain-prev-heading + 180) mod 360) default-distance next-depth 
+          set chain-shoaling false                        ;; stop shoaling, let new link in chain get into position   
+
+          let unused chain-maintain-horizontal-position chain-prev-heading chain-prev-hor-distance chain-prev-heading (0.6 * OS_bluelight_range) 1 0.2
+          OS_buoyancy_set_speed 0.00 
+        ]
+        [ 
+          ;; not possible to recruit further AUVs, instruct the shoal to turn around.
+          let res-heading ((chain-prev-heading + 180) mod 360)
+          let res-depth OS_sens_pressure     ;; two variables here (depth & shallow), not sure (yet) whether shoal is below or above end-link
+          let res-shallow OS_sens_pressure
+        
+          ;; this will be the case most of the time, chain going downwards, but algorithm can cope with chains originating from sea bed
+          ifelse OS_sens_pressure < chain-prev-depth  ;; adjust upper and lower depth limits, depends on whehter this AUV is deeper than next link or not
+          [ set res-shallow 0 ]
+          [ set res-depth chain-prev-depth ]
+        
+          chain-shoal-restrict  res-heading res-depth res-shallow          
+        ]
+      ]
+      
+      ;; cancel recruitment, if chain no longer stressed
+      if chain-recruit-state = "recruiter" and not chain-stress-test
+      [ chain-broadcast-terminate-recruitment "prev" ]
+        
+      ;; if shoaling is restricted, but chain no longer stressed, then derestrict
+      if shoal-restricted and not chain-stress-test
+      [ chain-shoal-derestrict ]
+      
+      if chain-shoaling                    ;; perform motion
+      [ controller-chain-shoal-update ]    ;; run the shoaling algorithm          
+    ]
+    ;;--------------------------------  
+    
+    if chain-start-link?
+    [ OS_movement_arc heading 0 20  ]                       ;; anchor the start of the chain       
+  ]
+      
+  ;; debugging
+  if chain-recruit-state = "recruiter" [ set color magenta ]
+  if chain-recruit-state = "agent"     [ set color lime]
+end
+
+;;======================================================
+;; procedures take a collection of AUVs (assumed to be in the chain) and returns the one nearest the end (the 'furthest'), 
+;; or the one nearest the start ('nearest').
+;;
+;; AUVs in the chain maintain the IDs of links either side of them, nearest the start (prev) and nearest the end (next).
+;; Given a collection of chain AUVs, the furthest or nearest AUV is the one that refers to an AUV in one of these links that 
+;; cannot actually be seen in the current AUV collection. (I can see A who can see B, but I can't see B myself, hence A is the furthest). 
+;;
+;; Returns the actual agent, not its ID
+;;======================================================
+to-report chain-furthest-link [ auvs ]
+  let auv-ids [ who ] of auvs  
+
+  ;; furthest AUV in the visible chain is the one who's next id can't be seen (beacuse its out of range) 
+  report one-of auvs with [ not member? chain-next-id auv-ids ]
+end
+to-report chain-nearest-link [ auvs ]
+  let auv-ids [ who ] of auvs  
+
+  ;; nearest auv in visible chain to start is the one who's prev auv can't be seen (beacuse its out of range) 
+  report one-of auvs with [ not member? chain-prev-id auv-ids ]
+end
+
+;;======================================================
+;; Convenience check for whether a link is an end of the chain
+;;======================================================
+to-report chain-end-link?
+  report (chain-next-id = -1)    ;; link is an end if there is a previous, but no next.   
+end
+
+to-report chain-middle-link?
+  report (chain-next-id != -1) and (chain-prev-id != -1)
+end
+
+to-report chain-start-link?
+  report (chain-prev-id = -1)   ;; start link has no previous link.
+end
+
+;;======================================================
+;; is the specified AUV a member of the exploratory shoal. This includes the end of a chain, and nlinks that are manuevering into position in the chain 
+;;======================================================
+to-report exploratory-auv? [ auv ] 
+  report [chain-alg-state] of auv = "explore" 
+         or ([chain-alg-state] of auv = "chain" and [chain-end-link?] of auv = true)
+         or ([chain-alg-state] of auv = "nlink")
+end
+
+;;======================================================
+;; reports whether the given AUV could be recruited into the chain or not. 
+;; Explore shoal auvs can only be recruited if there are sufficient neighbours, and chain-nav AUVs can always be recruited. 
+;; Chain-nav AUVs and nlink AUVs can always be recruited. 
+;;======================================================
+to-report chain-recruitable? [ auv ]
+  report ([chain-alg-state] of auv = "explore" and (count neighbours-RF >= recruitable-threshold))
+         or ([chain-alg-state] of auv = "chain-nav")
+         or ([chain-alg-state] of auv = "nlink")
+end
+
+;;======================================================
+;; Called by middle links to handle growing and shortening of the chain under stress and slack. 
+;;======================================================
+to chain-link-length-maintenance-middle
+  if chain-slack-test ;; remove this link from the chain
+  [
+    chain-become-chain-nav
+    set chain-nav-target "explore"                     ;; target is the exploratory shoal
+    
+    ask turtle chain-next-id                           ;; point previous and next auvs at one another, to remove this one
+    [ set chain-prev-id [chain-prev-id] of myself ]
+    ask turtle chain-prev-id
+    [ set chain-next-id [chain-next-id] of myself ]
+    
+    set chain-prev-id -1
+    set chain-next-id -1
+  ]
+end
+
+;;======================================================
+;; Returns true if the chain is sufficiently stressed and needs to recruit. False otherwise. 
+;;======================================================
+to-report chain-stress-test  
+  if chain-middle-link?
+  [
+    let stress chain-next-distance + chain-prev-distance
+    report ( stress > (chain-stress-threshold * 2) )  
+  ]
+  if chain-end-link?
+  [
+    report chain-prev-distance > chain-stress-threshold
+  ]
+end
+
+to-report chain-slack-test
+  let slack chain-next-distance + chain-prev-distance
+  report ( slack < (chain-slack-threshold * 2) )
+end
+
+;;======================================================
+;; A recursive procedure that allows a recruiter to propagate the message that recruitment is taking place to the rest of the chain. 
+;;
+;; NOTE that the method currently does not check that the next link in the chain is still within range. 
+;;
+;; Inputs: 'direction' - either "next" or "prev", depending which way the message needs to be broadcast along the chain
+;;         'recruiter-agent-id' is the id of the AUV that called this procedure. It is used to indicate the direction along the chain to the recruiter.
+;;======================================================
+to chain-broadcast-recruitment [ direction recruiter-agent-id ]
+  set chain-recruit-state "agent"
+  
+  if direction = "prev"                                   ;; the direction at which the recruiter lies (and where this recursive message came from) is logged
+  [ set chain-recruitment-direction "next" ]
+  if direction = "next"
+  [ set chain-recruitment-direction "prev" ]
+
+  if (chain-prev-id != -1) and (direction = "prev")  ;; do not recurse in the direction this call came from  
+  [
+    ask turtle chain-prev-id
+    [ chain-broadcast-recruitment direction [who] of myself ]      ;; recursive call along the chain      
+  ]   
+  if (chain-next-id != -1) and (direction = "next")  ;; do not recurse in the direction this call came from
+  [
+    ask turtle chain-next-id        
+    [ chain-broadcast-recruitment direction [who] of myself ]      ;; recursive call along the chain
+  ]     
+end
+
+;;======================================================
+;; A recursive procedure that allows a recruiter to propagate the message that recruitment has successfully completed, hence turning off the recruitment drive. 
+;;
+;; NOTE that the method currently does not check that the next link in the chain is still within range. 
+;;
+;; Inputs: 'direction' - either "next" or "prev", depending which way the message needs to be broadcast along the chain
+;;======================================================
+to chain-broadcast-terminate-recruitment [ direction ]
+  set chain-recruit-state "none"                            ;; indicate that recruitment has been successful, and is over
+  set chain-recruitment-direction "none"
+ 
+  if (chain-prev-id != -1) and (direction = "prev")
+  [
+    ask turtle chain-prev-id
+    [ chain-broadcast-terminate-recruitment direction ]     ;; recursive call along the chain      
+  ]   
+  
+  if (chain-next-id != -1) and (direction = "next")
+  [  
+    ask turtle chain-next-id        
+    [ chain-broadcast-terminate-recruitment direction ]     ;; recursive call along the chain
+  ]   
+end
+
+
+;;======================================================
+;; Update information concerning the locations of previous and next links in the chain.
+;;======================================================
+to chain-update-link-info
+  ;; TODO GPS
+  if chain-prev-id != -1
+  [
+    ;; TODO do this over radio
+    set chain-prev-depth [OS_sens_pressure] of turtle chain-prev-id
+
+    ;; returns a list (observed, observed-horizontal, angle, distance)
+    let result sum-sensor-heading chain-prev-id
+    ifelse (item 0 result = true) and (not GPS-triangulation)
+    [
+      set chain-prev-heading ((item 2 result) + heading) mod 360
+      set chain-prev-distance (item 3 result)
+      set chain-prev-hor-distance (item 4 result)
+    ]
+    [
+      ;; GPS based localisation, in case target was not observed on bluelight
+      set color brown
+      let prev-auv turtle chain-prev-id
+      set chain-prev-depth [OS_sens_pressure] of prev-auv
+      set chain-prev-heading atan ([xcor] of prev-auv - xcor) ([ycor] of prev-auv - ycor)    ;; this is absolute heading
+      set chain-prev-distance (distance prev-auv) * patchlength    
+      set chain-prev-hor-distance sqrt (([xcor] of prev-auv - xcor) ^ 2 +  ([ycor] of prev-auv - ycor) ^ 2)  
+    ]
+  ]
+  
+  if chain-next-id != -1
+  [
+    ;; TODO do this over radio
+    set chain-next-depth [OS_sens_pressure] of turtle chain-next-id
+
+    ;; returns a list (observed, observed-horizontal, angle, distance)
+    let result sum-sensor-heading chain-next-id
+    ifelse (item 0 result = true) and (not GPS-triangulation)
+    [
+      set chain-next-heading ((item 2 result) + heading) mod 360
+      set chain-next-distance (item 3 result)
+      set chain-next-hor-distance (item 4 result)
+    ]
+    [
+      set color brown
+      ;; GPS based localisation, in case target was not observed on bluelight
+      let next-auv turtle chain-next-id
+      set chain-next-depth [OS_sens_pressure] of next-auv 
+      set chain-next-heading atan ([xcor] of next-auv - xcor) ([ycor] of next-auv - ycor)  ;; this is absolute heading
+      set chain-next-distance (distance next-auv) * patchlength          ;; distance converted from patches to meters     
+      set chain-next-hor-distance sqrt (([xcor] of next-auv - xcor) ^ 2 +  ([ycor] of next-auv - ycor) ^ 2)         
+    ]
+  ]  
+end
+
+
+;;======================================================
+;; Calculates the relative heading to a target AUV based on which sensors can see the target.
+;; This is performed by identifying which sensors can see the target, and considering the unit
+;; vector of those sensors' headings. 
+;;
+;;  Target - an ID, not an AUV itself
+;;  Returns a list, 
+;;    item 1 = observed or not, on any sensor. 
+;;    item 2 = Observed on horizontal sensors. For safety, if not observed, then angle makes no sense
+;;    item 3 = the angle at which target was observed, in the horizontal plane
+;;    item 4 = the distance at which the target was observed
+;;    item 5 = the distance at which target was observed, only on the horizontal sensors
+;;======================================================
+to-report sum-sensor-heading [target]
+  let cos-ang 0
+  let sin-ang 0 
+  let dist 0                ;; distance at which the target was observed
+  let sensor-count 0        ;; number of sensors that observed the target
+  let dist-hor 0
+  let sensor-count-horizontal 0
+  let observed-vertical  false    ;; whether or not the target was observed on a vertical sensor
+  let observed-horizontal false   ;; whether or not the target was observed on horizontal sensors - angle makes no sense if not
+  
+  if (OS_sens_auv_front != nobody) and ([who] of OS_sens_auv_front = target)    ;; sensor positioned at 0 degrees (straight ahead)
+  [  ;; sin of zero is zero
+    set cos-ang (cos-ang + cos 0)  
+    set dist dist + OS_sens_BL_front
+    set sensor-count sensor-count + 1
+    set dist-hor dist-hor + OS_sens_BL_front
+    set sensor-count-horizontal sensor-count-horizontal + 1
+    set observed-horizontal true
+  ]
+  if (OS_sens_auv_front_right != nobody) and ([who] of OS_sens_auv_front_right = target)  ;; sensor positioned at 60 degrees
+  [
+    set sin-ang (sin-ang + sin 60)
+    set cos-ang (cos-ang + cos 60)    
+    set dist dist + OS_sens_BL_front_right    
+    set sensor-count sensor-count + 1
+    set dist-hor dist-hor + OS_sens_BL_front_right
+    set sensor-count-horizontal sensor-count-horizontal + 1
+    set observed-horizontal true
+  ]
+  if (OS_sens_auv_back_right != nobody) and ([who] of OS_sens_auv_back_right = target)  ;; sensor positioned at 120 degrees
+  [
+    set sin-ang (sin-ang + sin 120)
+    set cos-ang (cos-ang + cos 120)
+    set dist dist + OS_sens_BL_back_right        
+    set sensor-count sensor-count + 1    
+    set dist-hor dist-hor + OS_sens_BL_back_right
+    set sensor-count-horizontal sensor-count-horizontal + 1
+    set observed-horizontal true
+  ]
+  if (OS_sens_auv_back != nobody) and ([who] of OS_sens_auv_back = target)  ;; sensor positioned at 180 degrees
+  [
+    set sin-ang (sin-ang + sin 180)
+    set cos-ang (cos-ang + cos 180)    
+    set dist dist + OS_sens_BL_back  
+    set sensor-count sensor-count + 1      
+    set dist-hor dist-hor + OS_sens_BL_back
+    set sensor-count-horizontal sensor-count-horizontal + 1
+    set observed-horizontal true
+  ]
+  if (OS_sens_auv_back_left != nobody) and ([who] of OS_sens_auv_back_left = target)  ;; sensor positioned at -120 degrees
+  [
+    set sin-ang (sin-ang + sin -120)
+    set cos-ang (cos-ang + cos -120)    
+    set dist dist + OS_sens_BL_back_left    
+    set sensor-count sensor-count + 1    
+    set dist-hor dist-hor + OS_sens_BL_back_left
+    set sensor-count-horizontal sensor-count-horizontal + 1
+    set observed-horizontal true
+  ]
+  if (OS_sens_auv_front_left != nobody) and ([who] of OS_sens_auv_front_left = target)  ;; sensor positioned at -60 degrees
+  [
+    set sin-ang (sin-ang + sin -60)
+    set cos-ang (cos-ang + cos -60)    
+    set dist dist + OS_sens_BL_front_left    
+    set sensor-count sensor-count + 1    
+    set sensor-count-horizontal sensor-count-horizontal + 1
+    set dist-hor dist-hor + OS_sens_BL_front_left
+    set observed-horizontal true
+  ]
+  
+  if (OS_sens_auv_up != nobody) and ([who] of OS_sens_auv_up = target)  ;; sensor positioned at -60 degrees
+  [
+    set dist dist + OS_sens_BL_up    
+    set sensor-count sensor-count + 1    
+    set observed-vertical true    
+  ] 
+  if (OS_sens_auv_down != nobody) and ([who] of OS_sens_auv_down = target)  ;; sensor positioned at -60 degrees
+  [
+    set dist dist + OS_sens_BL_down    
+    set sensor-count sensor-count + 1    
+    set observed-vertical true    
+  ]   
+  
+  let angle -1                       ;; angle to be returned, this is the default error case
+  let observed-distance -1
+  if observed-horizontal = true                 ;; atan only works with two non-zero values
+  [ 
+    set angle atan sin-ang cos-ang   ;; atan meant to work with offsets, but unit components work just as well
+  ]
+  let observed-hor-distance -1
+  if observed-horizontal = true
+  [
+     set observed-hor-distance (dist-hor / sensor-count-horizontal)
+  ]
+  if sensor-count != 0
+  [ 
+     set observed-distance (dist / sensor-count)  ;; average of observed distances (in practice, particle based physics of netlogo means
+  ]                                               ;; all values are probably equal, but this calculation is truer to real life).    
+  
+  report (list (observed-horizontal or observed-vertical) observed-horizontal angle observed-distance observed-hor-distance)
+end
+
+
+;;======================================================
+;; Maintain the position of middle links in the chain. This includes links in the middle, and links on the end/start of the chain if
+;; they are not motionless. 
+;;======================================================
+to chain-link-motion-control-middle
+
+  let heading-to-prev-link  chain-prev-heading
+  let distance-to-prev-link chain-prev-distance
+  let heading-to-next-link  chain-next-heading                     
+  let distance-to-next-link chain-next-distance 
+          
+  let location-depth (chain-next-depth + chain-prev-depth) / 2     ;; maintain depth half way between prev and next links
+
+  ;;----------------------------
+  ;; calculates the 'location' where this link should be, in the horizontal plane. This is exactly between the prev and next link. 
+  ;; this is calculated using triangle geometry, between the current location, and the location of prev and next links. 
+  ;; angles are calculated from each point (if needed) to the other points on the triangle. From here the heading and distance from
+  ;; the current link location to the ideal 'location' can be calculated. 
+  let angle-between-prev-and-next subtract-headings heading-to-next-link heading-to-prev-link ;; the angle FROM the prev-link TO the next-link 
+    
+  let distance-prev-to-next (law-of-cosines distance-to-prev-link distance-to-next-link angle-between-prev-and-next)
+  let distance-prev-to-location (distance-prev-to-next / 2)    ;; location lies half way between the next and prev links
+
+  ;; try to stay within range of the previous link in the chain
+  if distance-prev-to-location > chain-stress-threshold
+  [ set distance-prev-to-location chain-stress-threshold ]
+
+  ;; going to calculate distance-to-location around the prev link. Hence, need angle from prev-link to location.     
+  let angle-from-prev-between-here-and-location 0
+  ifelse distance-to-next-link < distance-to-prev-link
+  [ 
+    set angle-from-prev-between-here-and-location (law-of-sines distance-to-next-link distance-prev-to-next (abs angle-between-prev-and-next))        
+  ][
+    let angle-from-next-between-here-and-prev (law-of-sines distance-to-prev-link distance-prev-to-next (abs angle-between-prev-and-next))
+    set angle-from-prev-between-here-and-location (180 - (abs angle-between-prev-and-next) - (abs angle-from-next-between-here-and-prev))
+  ]
+  ;; use law of cosines to find distnace to location based on distance to prev from here, distance to location from prev, and angle from prev between here and location         
+  let distance-to-location (law-of-cosines distance-to-prev-link distance-prev-to-location angle-from-prev-between-here-and-location ) ;; distance in meters
+
+  ;; must find the smaller of the two angles, because inverse sin returns values under 90 degrees, and there are two solutions, only one of which satisfies this
+  let angle-from-here-prev-to-location 0
+  let angle-from-location-between-prev-and-here 0
+  ifelse distance-to-prev-link < distance-prev-to-location 
+  [ ;; AUV closer to prev link than location is, hence angle at location is smaller. 
+    ;; to-report law-of-sines [ side-a side-c angle-C ]
+    set angle-from-location-between-prev-and-here (law-of-sines distance-to-prev-link distance-to-location (abs angle-from-prev-between-here-and-location))
+    set angle-from-here-prev-to-location (180 - (abs angle-from-location-between-prev-and-here) - (abs angle-from-prev-between-here-and-location))
+  ]
+  [ ;; location is closer to the prev link that this AUV is, hence angle at this AUV is smaller. 
+    set angle-from-here-prev-to-location (law-of-sines distance-prev-to-location distance-to-location angle-from-prev-between-here-and-location )
+    set angle-from-location-between-prev-and-here (180 - (abs angle-from-here-prev-to-location) - (abs angle-from-prev-between-here-and-location))
+  ]
+
+  ;let heading-to-location 0
+  ifelse (subtract-headings heading-to-next-link heading-to-prev-link) > 0       ;; location is either clockwise or anticlockwise from the prev link 
+  [ set heading-to-location heading-to-prev-link + angle-from-here-prev-to-location ]
+  [ set heading-to-location heading-to-prev-link - angle-from-here-prev-to-location ]
+  ;;----------------------------
+    
+  let thrust 0                         ;; don't have net forward thrust unless pointing in the right direction
+  if OS_movement_heading_achieved heading-to-location 10
+  [ set thrust (multiplier * distance-to-location) ]
+
+  OS_movement_arc heading-to-location thrust 20
+  OS_buoyancy_set_depth location-depth   ;; handles movement to the correct depth           
+end
+
+
+;;======================================================
+;; procedure identifies which way a nlink AUV should move to possition itself as a new link in the chain. 
+;;
+;; This is performed using triangle geometry. The nlink knows its current heading (roughly, if using bluelight) to the recruiter. It also
+;; knows the heading it should have to the recruiter if it was in the desired location. These two angles and both intended and current distance
+;; to the recruiter forms a triangle. Based on this, the nlink can calculate the offset from its current heading to the recruiter needed to reach
+;; the intended location. 
+;;
+;; Inputs:  'recruiter' - the AUV that is recruiting. 
+;; Returns: A list containing the following:
+;;        1) true/false, indicating whether current location (horizontal AND vertical) is within tolerable distance of where it should be. 
+;;        2) heading to where the AUV should be
+;;        3) speed at which it should move there
+;;======================================================
+to-report chain-nlink-position [ recruiter ]
+  let correct-depth        false    ;; these two boolean variables store true when the AUV is within tolerable location of where it should be
+  let correct-hor-distance true     ;; in case the recruiter cannot be seen on horizontal sensors, this is true by default  
+  
+  ;;--------------------------
+  ;; handles movement to the correct depth 
+  if abs( chain-link-default-depth - OS_sens_pressure ) < 0.05    ;; get within 5 cm of the correct depth
+  [ set correct-depth true ]
+  ;;--------------------------
+
+  let heading-to-recruiter 0     ;; the absolute heading from the new link AUV to the recruiter. This is taken from North, which is a heading of zero.
+  let distance-to-recruiter 0    ;; the current distance to the recruiter, perceived through the bluelight system
+  let speed-to-recruiter 0 
+     
+  set recruiter nobody           ;; have handled all the vertical movement, now looking at horrizontal
+  ;;--------------------------
+  ;; identify which sensor is perceiving the recruiter
+  ;; in practice the back sensor is the least useful, so doing it first means it can be overwritten if also seen on another sensor
+  if (OS_sens_auv_back != nobody) and ([chain-recruit-state] of OS_sens_auv_back = "recruiter")  
+  [ 
+    set recruiter OS_sens_auv_back
+    set heading-to-recruiter   (180 + heading) mod 360  
+    set distance-to-recruiter  OS_sens_BL_back    
+  ]
+  if (OS_sens_auv_front_right != nobody) and ([chain-recruit-state] of OS_sens_auv_front_right = "recruiter")
+  [ 
+    set recruiter OS_sens_auv_front_right
+    set heading-to-recruiter   (60 + heading) mod 360 
+    set distance-to-recruiter  OS_sens_BL_front_right
+  ]
+  if (OS_sens_auv_front_left != nobody) and ([chain-recruit-state] of OS_sens_auv_front_left = "recruiter")
+  [ 
+    set recruiter OS_sens_auv_front_left
+    set heading-to-recruiter   (-60 + heading) mod 360 
+    set distance-to-recruiter  OS_sens_BL_front_left
+  ]
+  ;;--------------------------
+  
+  if recruiter != nobody  ;; if no recruiter is found in the horizontal sensors, then no horizontal movement required in chain formation
+  [    
+    ;;-----------------------------
+    ;; The following can be uncommented to provide perfect (GPS-like) triangulation of where the recruiter lies in relation to the nlink. 
+    ;; This is much more accurate than using bluelight.
+    ;; TODO GPS
+    ;if GPS-triangulation
+    ;[ 
+    ;  set heading-to-recruiter atan ([xcor] of recruiter - xcor) ([ycor] of recruiter - ycor)
+    ;  set distance-to-recruiter (distance recruiter) * patchlength
+    ;]
+    ;;-----------------------------
+    let return-list chain-maintain-horizontal-position heading-to-recruiter distance-to-recruiter chain-link-default-heading chain-link-default-hor-distance  4 0.20   
+    set correct-hor-distance (item 0 return-list)
+    set heading-to-recruiter (item 1 return-list)
+    set speed-to-recruiter (item 2 return-list)
+  ]
+  
+  report (list (correct-depth and correct-hor-distance) heading-to-recruiter speed-to-recruiter)
+end
+
+
+;;======================================================
+;; procedure moves an AUV to where it should be in relation to a reference AUV, in the horizontal plane. This should only be called if the AUV can
+;; see the reference AUV on horizontal sensors. 
+;;
+;; This is performed using triangle geometry. The present AUV knows its current heading (roughly, if using bluelight) to the reference. It also
+;; knows the heading it *should* have to the reference if it was in the desired location. These two angles and both intended and current distance
+;; to the reference forms a triangle. Based on this, the present AUV can calculate the offset from its current heading to the reference needed to reach
+;; the intended location. 
+;;
+;; Returns: A list containing the following:
+;;        1) true/false, indicating whether current horizontal location is within tolerable distance of where it should be. 
+;;        2) heading to where the AUV should be
+;;        3) speed at which it should move there
+;;======================================================
+to-report chain-maintain-horizontal-position [current-heading-to-reference distance-to-reference ideal-heading-to-reference ideal-distance-to-reference speed-multiplier position-threshold]
+     
+  ;; the angle between where the AUV currently is, and where it should be, all in relation to to the reference AUV. IE, this is the angle 
+  ;; from the reference's perspective. Note also that subtract-headings will give the smallest angle (there are two ways round).
+  let angle-from-reference-between-here-and-location subtract-headings current-heading-to-reference ideal-heading-to-reference 
+                                                                                                                         
+  ;; distance from nlink to the location where it should be.
+  let distance-to-location (law-of-cosines chain-link-default-hor-distance distance-to-reference angle-from-reference-between-here-and-location)  
+
+  ;;-----------------------------
+  ;; determine angle from AUV to where it should be. This is calculated as a triangle, between the reference, the current AUV location, 
+  ;; and the 'location' where the AUV should be. There are two solutions to this problem, so the smaller of the two angles
+  ;; (either the angle at the 'location', or the angle at the current AUV) is calculated first. That is 
+  ;; determined from the distances of both location and AUV to the recruiter.
+  let angle-from-here-between-reference-and-location 0
+  ifelse ideal-distance-to-reference < distance-to-reference   
+  [ set angle-from-here-between-reference-and-location abs (law-of-sines ideal-distance-to-reference distance-to-location angle-from-reference-between-here-and-location)  ]
+  [
+    let angle-from-location-between-here-and-reference (law-of-sines distance-to-reference distance-to-location angle-from-reference-between-here-and-location)
+    set angle-from-here-between-reference-and-location (180 - (abs angle-from-location-between-here-and-reference) - (abs angle-from-reference-between-here-and-location))
+  ]
+  ;;-----------------------------
+  
+  ;;-----------------------------     
+  ;let heading-to-location 0 TODO HERE
+  ;; The following if statement condition determines whether a clockwise or anti-clockwise adjustement of heading to recruiter is required to reach location.
+  ;; Also a symmetry breaking mechanism - always assume clockwise if the recruiter is sensed on the rear sensor and location has been overshot. 
+  ;; Without this the AUV fishtails, switching between clockwise and anticlockwise. 
+  ifelse (subtract-headings current-heading-to-reference ideal-heading-to-reference) > 0
+  [ set heading-to-location (current-heading-to-reference + angle-from-here-between-reference-and-location) mod 360 ]
+  [ set heading-to-location (current-heading-to-reference - angle-from-here-between-reference-and-location) mod 360 ]
+  ;;-----------------------------
+  let speed (speed-multiplier * distance-to-location)  
+  if abs (subtract-headings heading-to-location heading) > 10 [ set speed 0 ]    ;; chain links should be direct in getting to where they want to go, no massive arcs
+  OS_movement_arc heading-to-location speed 20
+
+  ;; report several things. 1) whether the AUV is in position. 2) absolute heading to where it should be. 3) speed it should move in this heading at.
+  report (list (distance-to-location < position-threshold) heading-to-location speed)
+end
+
+
+
+
+;;======================================================
+;; Procedure is called to tell a recruiter to stop recruiting. This is is either because the 
+;; the recruiter has succeeded in adding a new link to the chain, or because the operation has
+;; been cancelled.
+;;======================================================
+to chain-recruiter-stop [ nlink-id ]
+  set chain-recruit-state "none"
+
+  if nlink-id != -1                      ;; if an nlink has successfully been recruited, rather than a forced termination of recruitment
+  [  
+    if chain-recruitment-direction = "next"
+    [ set chain-next-id nlink-id ]    ;; record the next link in the chain
+    if chain-recruitment-direction = "prev"
+    [ set chain-prev-id nlink-id ]    ;; record the prev link in the chain
+  ]
+  
+  if (chain-next-id != -1) 
+  [ ask turtle chain-next-id [ chain-broadcast-terminate-recruitment "next" ]  ]
+  
+  if (chain-prev-id != -1)
+  [ ask turtle chain-prev-id [ chain-broadcast-terminate-recruitment "prev" ]  ]
+  
+  set chain-recruitment-direction "none"   ;; not recruiting in either direction
+end
+
+
+
+;;======================================================
+;; procedure resets AUV performance variables to perform exploratory shoaling
+;;======================================================
+to chain-become-explore
+  set chain-alg-state "explore"
+  set chain-recruit-state "none"
+  set chain-nav-target    "none"
+  
+  chain-set-explore-shoal-params  
+  set cs-separation-threshold 0.3       ;; in terms of sensor readings, the distance at which this AUV attempts to avoid others around it. It is a proportion of maximum range
+  set cs-max-speed 7
+end
+
+;;======================================================
+;; procedure resets AUV performance variables to perform chain navigation
+;;======================================================
+to chain-become-chain-nav
+  show "become-chain-nav"
+  set chain-alg-state "chain-nav"
+ 
+  set cs-cohesion-weight 0.5
+  set cs-separation-weight 1.0
+  set cs-alignment-weight 0.0
+ 
+  set cs-separation-threshold 0.3       ;; in terms of sensor readings, the distance at which this AUV attempts to avoid others around it. It is a proportion of maximum range
+end
+
+;;======================================================
+;; procedure resets AUV performance variables to maneuver into position in the chain.
+;;======================================================
+to chain-become-nlink
+  set chain-alg-state     "nlink"
+  set chain-recruit-state "none"
+  set chain-nav-target    "none"
+
+  set cs-cohesion-weight 0.0
+  set cs-separation-weight 1.0
+  set cs-alignment-weight 0.0
+ 
+  set cs-separation-threshold 0.3       ;; in terms of sensor readings, the distance at which this AUV attempts to avoid others around it. It is a proportion of maximum range
+end
+
+;;======================================================
+;; procedure resets AUV performance variables to behave as chain members. There is a particular case with the end of the chain, which must behave as the exploratory shoal would. 
+;;======================================================
+to chain-become-chain
+  set chain-alg-state "chain"
+  set cs-max-speed 10
+  
+  chain-set-explore-shoal-params
+end
+
+;;======================================================
+;; procedure sets AUV shoaling performance for the exploratory shoal (which can include the end of the chain). 
+;;======================================================
+to chain-set-explore-shoal-params
+  set cs-cohesion-weight   1
+  set cs-separation-weight 0.5
+  set cs-alignment-weight  1   
+end
+
+;;======================================================
+;; The chain link calling this becomes a recruiter, and tries to recruit to the prev link in the chain. 
+;;======================================================
+to chain-recruit-prev [ heading-to-link distance-to-link depth-to-link ]
+  show "recruting a new start of the chain"
+  set chain-recruit-state "recruiter"
+  set chain-recruitment-direction "prev"
+  
+  ;; normal direction of the chain is expressed in terms of the next link. Must be reversed for recruitment at the start
+  set chain-recruiter-ndepth    depth-to-link 
+  set chain-recruiter-nheading  heading-to-link   
+  set chain-recruiter-ndist     distance-to-link
+
+  if chain-prev-id != -1
+  [ ask turtle chain-prev-id [ chain-broadcast-recruitment "prev" [who] of myself ] ]    ;; inform the rest of the chain that recruitment has begun.   
+
+  if chain-next-id != -1
+  [ ask turtle chain-next-id [ chain-broadcast-recruitment "next" [who] of myself ] ]     ;; inform the rest of the chain that recruitment has begun.   
+end
+
+;;======================================================
+;; Called when trying to build a chain in a particular direction
+;;======================================================
+to chain-build-recruit-prev
+  let heading-to-link   (nlink-heading + 180) mod 360
+  let distance-to-link  nlink-distance
+  let depth-to-link     OS_sens_pressure + (nlink-relative-depth * -1)   
+
+  chain-recruit-prev heading-to-link distance-to-link depth-to-link  
+end
+
+
+;;======================================================
+;; The chain link calling this becomes a recruiter, and tries to recruit to the next link in the chain. 
+;;======================================================
+to chain-recruit-next [ heading-to-link distance-to-link depth-to-link ]
+  set chain-recruit-state "recruiter"
+  set chain-recruitment-direction "next"
+  
+  set chain-recruiter-ndepth    depth-to-link 
+  set chain-recruiter-nheading  heading-to-link
+  set chain-recruiter-ndist     distance-to-link
+
+  if chain-prev-id != -1
+  [ ask turtle chain-prev-id [ chain-broadcast-recruitment "prev" [who] of myself ] ]    ;; inform the rest of the chain that recruitment has begun.   
+
+  if chain-next-id != -1
+  [ ask turtle chain-next-id [ chain-broadcast-recruitment "next" [who] of myself ] ]    ;; inform the rest of the chain that recruitment has begun.   
+end
+
+
+;;======================================================
+;; Called when trying to build a chain in a particular direction
+;;======================================================
+to chain-build-recruit-next
+  let heading-to-link   nlink-heading
+  let distance-to-link  nlink-distance
+  let depth-to-link     OS_sens_pressure + nlink-relative-depth 
+  
+  chain-recruit-next heading-to-link distance-to-link depth-to-link
+end
+
+
+
+;;======================================================
+;; Responsible for starting the chain, the AUV calling this becomes the first link in the chain. 
+;;======================================================
+to chain-seed-chain
+  set chain-alg-state "chain"
+  set chain-prev-id -1      ;; no other links in the chain.
+  set chain-next-id -1
+end
+
+
+
+;;======================================================
+;; For solving triangles. This represents the law of cosines. Returns the length of c, given sides a & b and angle C in the following triangle. 
+;;       
+;;      /\
+;;  a  / C\  b
+;;    /    \       (lower case letters are lengths of sides, upper case are angles. Sides and angles are notated as opposite one another
+;;   /B    A\
+;;  ----------
+;;       c 
+;;
+;;  law of cosines says that:  c^2 = a^2 + b^2 + 2ab cos(C)
+;;
+;;  Returns: length of side C
+;;======================================================
+to-report law-of-cosines [ side-a side-b angle-C ]
+  let side-c sqrt ( (side-a ^ 2) + (side-b ^ 2) - (2 * side-a * side-b * (cos angle-C)) )
+  report side-c
+end
+
+
+;;======================================================
+;; For solving triangles. This represents the law of sines. Returns angle A given sides a and c, and angle C. 
+;;       
+;;      /\
+;;  a  / C\  b
+;;    /    \       (lower case letters are lengths of sides, upper case are angles. Sides and angles are notated as opposite one another
+;;   /B    A\
+;;  ----------
+;;       c 
+;;
+;;  law of cosines says that:  a / sin A  =  b / sin B  =  c / sin C
+;;
+;;  Returns: Angle A
+;;======================================================
+to-report law-of-sines [ side-a side-c angle-C ]
+  let angle-A asin ( (side-a  * (sin angle-C)) / side-c ) ;; rearrangement of the above to give angle C. 
+  report angle-A
+end

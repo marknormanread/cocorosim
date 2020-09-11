@@ -1,0 +1,71 @@
+;;====================================================
+;;====================================================
+;;
+;; UY's implementation of BIODS, this file contains parameter declarations and assignments. This is to ease the transfer of 
+;; implementation code between svn branches. In some branches the parameters are defined and given values through the netlogo
+;; gui. However for experimentation on a cluster these must be defined and assigned in code, complicating the migration of code. 
+;; Hence this file. 
+;; 
+;; In boids, each boid follows the following three rules:
+;; 1) Collision avoidance, avoid collisions with nearby objects
+;; 2) Velocity matching, try to match velocity with nearby boids. 
+;; 3) Flock centering, try to stay close to nearby boids. 
+;;
+;; Orginal boids implementation found on this webpage: http://www.red3d.com/cwr/boids/
+;;
+;;====================================================
+;;====================================================
+
+globals 
+[
+  ;;------------------------------------------------------------------
+  ;; These relate to different levels of information sharing, and triangulation. 
+  boids-info-share                ;; 'all','heading','speed','none'. What information relating to velocity is directly communicated between boids
+  boids-RF-info-share             ;; boolean. Whether information is shared (if it is shared) only with nearest auv (bluelight) or within a radius (RF).
+  boids-BL-triangulation      ;; boolean. True -> only distance within a sensor cone to nearest obstacle can be determined.
+                                  ;;  False -> exact triangulation, angle and distance, not only the nearest obstacle. GPS, if you will. 
+  ;;------------------------------------------------------------------
+  
+  ;;------------------------------------------------------------------
+  ;; These variables are directly related to algorithmic performance.
+  boids-observation-range         ;; in meters, the range that boids can sense around them
+  boids-observation-angle         ;; the angle that boids can see. 360 = everywhere; 180 = 90 degrees left and right.
+  boids-observe-backwards
+ 
+  ;boids-cohesion-weight           ;; how much weight is given to trying to turn into swarm center when calculating boid movement
+  ;boids-separation-weight         ;; how much weight is given to trying to avoid other boids when calculating boid movement
+  ;boids-alignment-weight          ;; how much weight is given to tyring to match velocity with other boids when calculating boid movement
+  boids-separation-threshold      ;; in terms of sensor readings, the distance at which this AUV attempts to avoid others around it. 
+
+  boids-speed-scalar              ;; scalar by which speeds determined by boids rules are multipled when converting into percentage of max thrust
+  ;boids-max-speed                 ;; the maximum speed that a boid can give the OS. This is interpreted as a percentage of maximum thrust
+    
+  ;boids-turn-gain                 ;; the speed with which boids turn to their desired directions. This interfaces with the OS arc function.
+  ;;------------------------------------------------------------------
+]
+
+to controller-setup-parameters
+  set boids-info-share "all"
+  set boids-RF-info-share true
+  set boids-BL-triangulation true
+  
+  ;;-----------------------------------------
+  ;; these variables concern algorithmic performance.
+  set boids-observation-range 0.5
+  set boids-observation-angle 360
+  set boids-observe-backwards false
+  
+  ;set boids-cohesion-weight   1.0
+  ;set boids-separation-weight 1.0
+  ;set boids-alignment-weight  1.0
+  
+  set boids-separation-threshold 0.3       ;; in terms of sensor readings, the distance at which this AUV attempts to avoid others around it. It is a proportion of maximum range
+ 
+  set boids-speed-scalar 100
+  ;set boids-max-speed    10
+   
+  ;set boids-turn-gain 3.0
+  ;;-----------------------------------------
+
+end    
+    

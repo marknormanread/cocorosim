@@ -1,0 +1,112 @@
+;; #################################################################
+;; MR's implementation of Christoph Moeslinger's shoaling algorithm. 
+;;
+;; This implementation covers the 6 sensor AUV (dummy)
+;; #################################################################
+
+
+globals
+[
+  ;;----------------------------
+  ;; These hold values between 0 and 1, representing a proportion of the sensor's range
+  GS-cohesion-range        
+  GS-back-cohesion-range
+  GS-separation-range
+  ;;----------------------------
+  GS-speed           ;; this is a percentage of full forwards thrust
+  GS-turn-angle      ;; the angle to turn left/right if something is too close/far
+  GS-vertical-speed  ;; speed at which to rise and fall if something is too close/far. Units = meters/second
+]
+
+
+turtles-own
+[]
+
+
+;; #################################################################
+;; Called by every AUV to set up. 
+;; #################################################################
+to controller-setup
+  set GS-cohesion-range       0.6
+  set GS-back-cohesion-range  0.8
+  set GS-separation-range     0.5
+
+  set GS-speed          1
+  set GS-turn-angle     15  
+  set GS-vertical-speed 0.01
+end
+
+
+;; #################################################################
+;; Called by the OS to step the controller 
+;; #################################################################
+to controller-update
+
+  ;; store distances sensed for local use 
+  let dist-FR   OS_sens_BL_front_right 
+  let dist-FL   OS_sens_BL_front_left
+  let dist-back OS_sens_BL_back
+  let dist-up   OS_sens_BL_up
+  let dist-down OS_sens_BL_down
+
+  ;; thresholds at which cohesion/separation occurs
+  let cohesion-threshold   OS_bluelight_range * GS-cohesion-range
+  let back-cohesion-range  OS_bluelight_range * GS-back-cohesion-range
+  let separation-range     OS_bluelight_range * GS-separation-range
+        
+  let relative-desired-heading 0           ;; updated during the algorithm. This is the relative heading to which the AUV must turn  
+  let desired-vertical-speed 0             ;; updated during the algorithm, this is the speed at which AUV should rise/sink
+  let desired-horizontal-speed GS-speed   ;; this is a pecentage of maximum force that the thrusters can deliver
+  
+  ;;----------------------------
+  ;; Check for obstacles within the separation range
+  if OS_sens_BL_front_right < separation-range
+  [  set relative-desired-heading (relative-desired-heading - GS-turn-angle)  ]
+  
+  if OS_sens_BL_front_left < separation-range
+  [  set relative-desired-heading (relative-desired-heading + GS-turn-angle)  ]    
+  
+  if OS_sens_BL_up < separation-range
+  [  set desired-vertical-speed (desired-vertical-speed - GS-vertical-speed)  ]
+  
+  if OS_sens_BL_down < separation-range
+  [  set desired-vertical-speed (desired-vertical-speed + GS-vertical-speed)  ]
+  ;;----------------------------
+  
+  ;;----------------------------
+  ;; cohesion code, to keep AUVs together. 
+  if (dist-FR > cohesion-threshold)  and (dist-FR < OS_bluelight_range)
+  [ set relative-desired-heading (relative-desired-heading + GS-turn-angle) ]
+  
+  if (dist-FL > cohesion-threshold)    and (dist-FL < OS_bluelight_range)
+  [ set relative-desired-heading (relative-desired-heading - GS-turn-angle) ]
+  
+  if (dist-up > cohesion-threshold)    and (dist-up < OS_bluelight_range)
+  [ set desired-vertical-speed (desired-vertical-speed + GS-vertical-speed) ]
+  
+  if (dist-down > cohesion-threshold)  and (dist-down < OS_bluelight_range)
+  [ set desired-vertical-speed (desired-vertical-speed - GS-vertical-speed) ]
+      
+  if dist-back > back-cohesion-range   and (dist-back < OS_bluelight_range)
+  [ set relative-desired-heading (relative-desired-heading + (2 * GS-turn-angle)) ]
+  ;;----------------------------
+  
+  ;;----------------------------
+  ;; AUVs that sense nothing in range are coloured red
+  let neighbours own-in-radius (OS_bluelight_range / patchlength)     ;; find all neighbours within observation range and cone
+  ifelse count neighbours != 0
+  [ set color yellow ]
+  [ 
+    set color red 
+    set desired-horizontal-speed 10    ;; lost swarm, go at 10% of full thrust
+  ]
+  ;;----------------------------
+  
+  ;; Use the OS to control the AUV. 
+  OS_movement_arc (OS_orient_rel_to_abs_heading relative-desired-heading) (desired-horizontal-speed) 5
+  OS_buoyancy_set_speed desired-vertical-speed  
+
+
+end
+  
+  

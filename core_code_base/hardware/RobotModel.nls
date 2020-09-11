@@ -1,0 +1,205 @@
+; This file describes a dummy robot provided as a default in the simulation. It is not based on the actual hardware platforms that are likely
+; to be developed within CoCoRo. These will be simulated using other files in due course. 
+;
+
+
+to robotmodel-create-AUV-DUMMY [this-patch]                   ; the patch on which the AUV should be created
+  let new-robot core-create-AUV-DUMMY this-patch      ; new-robot is the "empty" AUV that has been created
+  ask new-robot [OS-setup-dummy]                              ; load dummy specific sensor values
+  ask new-robot [robotmodel-add-sensors-AUV-DUMMY]            ; the sensors are added to the "empty" robot
+  ask new-robot [robotmodel-add-actuators-AUV-DUMMY]          ; the actuators are added to the "empty" robot
+end
+
+
+to robotmodel-create-basestation-DUMMY [this-patch]           ; the patch on which the AUV should be created
+  let new-robot core-create-default-basestation-DUMMY this-patch ; new-robot is the "empty" basestation that has been created
+  ask new-robot [OS-setup-lily]                               ; load lily specific sensor values (for the moment assume basestation is same as lily)
+  ask new-robot [robotmodel-add-sensors-basestation-DUMMY]    ; the sensors are added to the "empty" robot
+  ask new-robot [robotmodel-add-actuators-basestation-DUMMY]  ; the actuators are added to the "empty" robot
+end
+
+to robotmodel-create-AUV-Lily [this-patch]                    ; the patch on which the AUV should be created
+  let new-robot core-create-AUV-Lily this-patch       ; new-robot is the "empty" AUV that has been created
+  ask new-robot [OS-setup-lily]                               ; load lily specific sensor values  
+  ask new-robot [robotmodel-add-sensors-AUV-Lily]             ; the sensors are added to the "empty" robot
+  ask new-robot [robotmodel-add-actuators-AUV-Lily]           ; the actuators are added to the "empty" robot
+end
+
+;;===========================================================
+;; Sensor hardware configuration for the 'dummy' AUV
+;;===========================================================
+to robotmodel-add-sensors-AUV-DUMMY ; this important procedure describes the the sensor configuration of the AUV
+  ;DO NOT CHANGE: Format of sensors: [ TYPE DESCRIPTION TYPE-HUMANREADABLE PARAMETER_1 PARAMETER_2 ...] 
+  
+         ;; sensor for seeing other AUVs; Parameters: sensor-heading; sensor-pitch; sensor-range; sensor-aperture 
+  core-add-sensor-description [ 1 "passive-distance-sensor-front" "passive-distance-MK1" 0 0   10 90] 
+  core-add-sensor-description [ 1 "passive-distance-sensor-right" "passive-distance-MK1" 90 0  10 90]
+  core-add-sensor-description [ 1 "passive-distance-sensor-back"  "passive-distance-MK1" 180 0 10 90]
+  core-add-sensor-description [ 1 "passive-distance-sensor-left"  "passive-distance-MK1" -90 0 10 90]  
+  core-add-sensor-description [ 1 "passive-distance-sensor-up"    "passive-distance-MK1" 0 90  10 90]
+  core-add-sensor-description [ 1 "passive-distance-sensor-down"  "passive-distance-MK1" 0 -90 10 90] 
+  
+         ;; sensor only (!) for seeing borders; Parameters: sensor-heading; sensor-range;
+  core-add-sensor-description [ 2 "active-border-distance-sensor-front" "active-distance-MK1" 0  10] 
+  core-add-sensor-description [ 2 "active-border-distance-sensor-right" "active-distance-MK1" 90 10] 
+  core-add-sensor-description [ 2 "active-border-distance-sensor-back" "active-distance-MK1" 180 10]
+  core-add-sensor-description [ 2 "active-border-distance-sensor-left" "active-distance-MK1" -90 10]  
+  
+  ;;-----------------------------
+  ;; this is depricated, the is an OS function that can fulfil this function very efficiently. 
+  core-add-sensor-description [ 3 "ground-distance-sensor" "ground-distance-MK1" 5] ; sensor for seeing the ground; Parameters: sensor-range;
+  ;;-----------------------------
+   
+  core-add-sensor-description [ 4 "depth-pressure-sensor" "Pressure-MK1" 1] ; Parameters: pressure to z-coordinate ratio
+  
+  core-add-sensor-description [ 5 "AUV-neighbors-sensor" "Acoustic-MK1" 15] ; Parameters: range
+  
+  core-add-sensor-description [ 6 "distance-to-basestation-sensor" "Acoustic-MK2" 30] ; Parameters: range
+  
+  core-add-sensor-description [ 7 "compass-sensor" "Compass-MK1"] ; no Parameters
+   
+  core-add-sensor-description [ 8 "electric-field-sensor" "Electric-MK1" 1] ; Parameters: range
+
+  core-add-sensor-description [ 9 "environment-chemical-sensor" "Chemical-MK1"] ; no Parameters
+  
+  ;;-----------------------------
+  ;; sensor represents distance sensor pointing downwards - measures distance from bottom of tank (currently only directly downwards, no aperture)
+  ;; parameters: sensor ID; description; other desription; range of sensor in body-lengths (patches)
+  ;; this sensor is depricated, there is an OS function that performs this function in a more computationally efficient manner     
+  core-add-sensor-description [ 10 "active-border-distance-sensor-down" "active-depth-MK1" 0.5] 
+  ;;-----------------------------
+end
+
+
+;;===========================================================
+;; Sensor hardware configuration for the Lily AUV
+;;===========================================================
+to robotmodel-add-sensors-AUV-Lily 
+  ;DO NOT CHANGE: Format of sensors: [ TYPE DESCRIPTION TYPE-HUMANREADABLE PARAMETER_1 PARAMETER_2 ...] 
+  
+         ;; sensor for seeing other AUVs; Parameters: sensor-heading; sensor-pitch; sensor-range; sensor-aperture 
+  core-add-sensor-description [ 1 "passive-distance-sensor-front-left"  "passive-distance-MK1" 300 0   5.5  120] 
+  core-add-sensor-description [ 1 "passive-distance-sensor-front-right" "passive-distance-MK1" 60  0   5.5  120]
+  core-add-sensor-description [ 1 "passive-distance-sensor-back"        "passive-distance-MK1" 180 0   5.5  120]  
+  core-add-sensor-description [ 1 "passive-distance-sensor-up"          "passive-distance-MK1" 0   90  5.5  120]
+  core-add-sensor-description [ 1 "passive-distance-sensor-down"        "passive-distance-MK1" 0   -90 5.5  120] 
+  
+         ;; sensor only (!) for seeing borders; Parameters: sensor-heading; sensor-range;
+  core-add-sensor-description [ 2 "active-border-distance-sensor-front-left"  "active-distance-MK1" 300  3] 
+  core-add-sensor-description [ 2 "active-border-distance-sensor-front-right" "active-distance-MK1"  60  3] 
+  core-add-sensor-description [ 2 "active-border-distance-sensor-back"        "active-distance-MK1" 180  3] 
+  
+  ;;-----------------------------
+  ;; this is depricated, the is an OS function that can fulfil this function very efficiently. 
+  core-add-sensor-description [ 3 "ground-distance-sensor" "ground-distance-MK1" 3]  ; sensor for seeing the ground; Parameters: sensor-range;  
+  ;;-----------------------------
+  core-add-sensor-description [ 4 "depth-pressure-sensor"  "Pressure-MK1" 1]         ; parameters: pressure to z-coordinate ratio  
+  core-add-sensor-description [ 5 "AUV-neighbors-sensor"   "Acoustic-MK1" 5.5]       ; Parameters: range  
+  core-add-sensor-description [ 6 "distance-to-basestation-sensor" "Acoustic-MK2" 45] ; Parameters: range
+  core-add-sensor-description [ 7 "compass-sensor" "Compass-MK1"]                    ; no Parameters  
+  core-add-sensor-description [ 8 "electric-field-sensor" "Electric-MK1" 1]          ; Parameters: range
+  core-add-sensor-description [ 9 "environment-chemical-sensor" "Chemical-MK1"]      ; no Parameters 
+  ;;-----------------------------
+  ;; sensor represents distance sensor pointing downwards - measures distance from bottom of tank (currently only directly downwards, no aperture)
+  ;; parameters: sensor ID; description; other desription; range of sensor in body-lengths (patches)
+  ;; this sensor is depricated, there is an OS function that performs this function in a more computationally efficient manner     
+  core-add-sensor-description [ 10 "active-border-distance-sensor-down" "active-depth-MK1" 0.3] 
+  ;;-----------------------------
+end
+
+;;===========================================================
+;; Actuator hardware configuration for the Lily AUV
+;;===========================================================
+to robotmodel-add-actuators-AUV-DUMMY ; this important procedure describes the the actuator configuration of the AUV
+  ;DO NOT CHANGE: Format of actuators: [ TYPE DESCRIPTION TYPE-HUMANREADABLE PARAMETER_1 PARAMETER_2 ...] 
+  core-add-actuator-description [ 1 "thruster-leftside-backward" "TH-MK1" -2.5 2.5]  ; Parameters: minimal volt value; maximum volt value; negative values are for backwards thrusting
+  core-add-actuator-description [ 1 "thruster-rightside-backward" "TH-MK1" -2.5 2.5]
+  core-add-actuator-description [ 2 "buoyancy" "BUY-MK1"] 
+end
+
+to robotmodel-add-actuators-AUV-Lily ; this important procedure describes the the actuator configuration of the AUV
+  ;DO NOT CHANGE: Format of actuators: [ TYPE DESCRIPTION TYPE-HUMANREADABLE PARAMETER_1 PARAMETER_2 ...]     
+  core-add-actuator-description [ 1 "thruster-leftside-backward"  "TH-MK1" -2.5 2.5]  ; Parameters: minimal volt value; maximum volt value; negative values are for backwards thrusting
+  core-add-actuator-description [ 1 "thruster-rightside-backward" "TH-MK1" -2.5 2.5]
+  core-add-actuator-description [ 2 "buoyancy" "BUY-MK1" 0.975 1.025] ; Parameters: minimal percentage of water density of AUV; maximum percentage of water density of AUV;
+end
+
+
+to robotmodel-add-sensors-basestation-DUMMY ; this important procedure describes the the sensor configuration of the AUV
+  ; empty
+end
+
+to robotmodel-add-actuators-basestation-DUMMY ; this important procedure describes the the actuator configuration of the AUV
+  ; empty  
+end  
+  
+
+to robotmodel-update-sensors ; a single robot updates its sensors here
+
+  let sensor-number 0 ; used for the counter below
+
+  foreach list-of-sensor-descriptions ; each added sensor is updated differently --
+  [
+    let sensor-type-id item 0 (item sensor-number list-of-sensor-descriptions) ; -- depending on its sensor type
+    if (sensor-type-id = 4) [robotmodel-update-pressure-sensor sensor-number]
+    if (sensor-type-id = 5) [robotmodel-update-acoustic-counter-sensor sensor-number]
+    if (sensor-type-id = 6) [robotmodel-update-acoustic-distance-sensor sensor-number]
+    if (sensor-type-id = 7) [robotmodel-update-compass sensor-number]
+    if (sensor-type-id = 8) [robotmodel-update-electric-field sensor-number]
+    if (sensor-type-id = 9) [robotmodel-update-chemical-sensor sensor-number]
+    ; add new sensor types here  
+    set sensor-number (sensor-number + 1) ; counter increase
+  ]
+  set near-robots (own-in-radius (OS_bluelight_range * 1.1)); simulation speed enhancement; for a more efficient sensor calculation, only use other robots which are close
+  ;my-cone near-robots 15 60
+end
+
+
+
+
+to robotmodel-update-ground-distance-sensors [ sensor-number ] ; how the ground distance sensor is updated 
+  let sensor-range item 3 (item sensor-number list-of-sensor-descriptions) ; the parameter from the description is read
+      ; the old value of this sensor in the internal sensor volt values list is exchanged by the new value 
+  set list-of-sensor-volt-values (replace-item sensor-number list-of-sensor-volt-values (sensor-ground-distance-value-volts sensor-range)) 
+end 
+
+
+to robotmodel-update-pressure-sensor [ sensor-number ] ; how the pressure sensor is updated 
+  let z-coordinate-to-pressure-ratio item 3 (item sensor-number list-of-sensor-descriptions) ; a certain pressure-to-depth ratio is read in from the description
+      ; the old value of this sensor in the internal sensor volt values list is exchanged by the new value   
+  set list-of-sensor-volt-values (replace-item sensor-number list-of-sensor-volt-values (sensor-pressure-value-volts z-coordinate-to-pressure-ratio)) 
+end 
+
+
+to robotmodel-update-acoustic-counter-sensor [ sensor-number ] ; how the acoustic sensor (that counts the near other AVUs) is updated 
+  let acoustic-range item 3 (item sensor-number list-of-sensor-descriptions)  
+  set list-of-sensor-volt-values (replace-item sensor-number list-of-sensor-volt-values (sensor-acoustic-counter-value-volts acoustic-range)) 
+end
+
+
+to robotmodel-update-acoustic-distance-sensor [ sensor-number ] ; how the acoustic sensor (that senses the distance to the basestation) is updated 
+  let acoustic-range item 3 (item sensor-number list-of-sensor-descriptions)  
+  set list-of-sensor-volt-values (replace-item sensor-number list-of-sensor-volt-values (sensor-acoustic-distance-value-volts acoustic-range)) 
+end
+
+
+to robotmodel-update-compass [ sensor-number ]
+  set list-of-sensor-volt-values (replace-item sensor-number list-of-sensor-volt-values (sensor-compass))
+end
+
+to robotmodel-update-electric-field [ sensor-number ]
+  set list-of-sensor-volt-values (replace-item sensor-number list-of-sensor-volt-values (electric-field))
+end
+  
+  
+to robotmodel-update-chemical-sensor [ sensor-number ]
+  set list-of-sensor-volt-values (replace-item sensor-number list-of-sensor-volt-values (sensor-chemical))
+end
+
+
+to robot-model-update-active-ground-sensor [ sensor-number ]
+  let sensor-range item 3 (item sensor-number list-of-sensor-descriptions)
+  
+  set list-of-sensor-volt-values (replace-item sensor-number list-of-sensor-volt-values (sensor-active-ground-distance-value-volts sensor-range))
+end
+

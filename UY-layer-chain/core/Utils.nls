@@ -1,0 +1,255 @@
+
+
+to Utils-setup ; all procedures that measure the experiment are initialized here
+  
+end
+
+
+to Utils-update ; all procedures that measure the experiment are updated here
+  
+end
+
+
+
+;;=========================================================
+;; Computes the angle between two vectors, A and B.  
+;;
+;; The maths underpinning this can be computationally expensive. If the vectors don't move over the course of an experiment
+;; then it is a good idea to compute the answers once and save them. EG, when computing the angle between a forward on a robot
+;; and where a particular sensor is pointing. 
+;;=========================================================
+to-report angle-between-vectors [a1 a2 a3 b1 b2 b3]
+  let dot-p dot-product a1 a2 a3 b1 b2 b3
+  let theta acos ( dot-p / ((vector-magnitude a1 a2 a3) * (vector-magnitude b1 b2 b3)) )
+  report theta
+end
+
+
+;;=========================================================
+;; Computes the dot product of two vectors.
+;;
+;; This is the magnitude of the projection of one vector onto another. A good explanation of this is given in
+;; http://en.wikipedia.org/wiki/Dot_product
+;;=========================================================
+to-report dot-product [a1 a2 a3 b1 b2 b3]
+  report (a1 * b1) + (a2 * b2) + (a3 * b3)
+end
+
+
+;;=========================================================
+;; Computes the cross product of two vectors, a and b.
+;;
+;; The cross product produces a vector that is normal to the plane in which a and b lie. I believe that the length of
+;; the cross product vector is equivalent to the area formed by the the parallelogram of a and b. 
+;; http://en.wikipedia.org/wiki/Cross_product
+;;
+;; The following calculation is used:
+;;  (a1)   (b1)   (a2b3 - a3b2)   (c1)
+;;  (a2) x (b2) = (a3b1 - a1b3) = (c2)
+;;  (a3)   (b3)   (a1b2 - a2b1)   (c3)
+;;
+;; Procedure returns a list containing C1, C2 and C3, in that order. 
+;;=========================================================
+to-report cross-product [ a1 a2 a3  b1 b2 b3]
+  let c1 ( (a2 * b3) - (a3 * b2))
+  let c2 ( (a3 * b1) - (a1 * b3))
+  let c3 ( (a1 * b2) - (a2 * b1))
+  
+  report (list c1 c2 c3)
+end
+
+
+;;=========================================================
+;; Given a heading and a pitch, this computes a unit vector pointing in that direction. It operates by assuming a vector
+;; pointing straight forwards (say, along the direction that an AUV is pointing, straight forward), and turns it by 
+;; a heading and tilts it by a pitch. 
+;;
+;; Returns a list containing the unit vector components (y, x, z) - (forward, side, up). 
+;;
+;; Note that the y axis is assumed to point along the length of the AUV. X is assumed to be left and right, and z represents
+;; up and down. 
+;;
+;; Note that a heading of 0 points in the same direction of the AUV, and a pitch of 90 points stright upwards. 
+;;=========================================================
+to-report unit-vector-from-heading-pitch [ heading-angle pitch-angle ]
+  let y (1 * cos heading-angle * cos pitch-angle)
+  let x (0 * sin heading-angle * cos pitch-angle)
+  let z (0 * cos pitch-angle)
+  report (list y x z)
+end
+
+;;=========================================================
+;; Calculates length of 3D vector usying pythagoras' theorm.
+;;=========================================================
+to-report vector-magnitude [a1 a2 a3]
+  report sqrt ((a1 ^ 2) + (a2 ^ 2) + (a3 ^ 2))
+end
+
+
+
+;; ###########################################################################
+;; #      
+;; #  Establishes which agents are within a cone of perception of current turtle. The cone's orientation is implicit, along the current heading of the turtle. 
+;; #  Hence, to sense in any other direction, the turtle must be turned/pitched, this procedure called, and the turtles direction reset. 
+;; #
+;; #  The heading of zero degrees is assumed to point straight down the y axis (-ve values). A heading of 10 degrees is assumed to be 10 degrees clockwise from this. 
+;; #
+;; #  input: agentset of AUVs which are in radius, range of the sensor, angle of aperture of the sensor
+;; #  output: agentset of AUVs which are in cone of the sensor
+;; #                                                                         
+;; ###########################################################################
+to-report AUVs-in-cone [ agentset-in-radius range sensing-angle ]
+  
+  let agents-in-radius ([who] of agentset-in-radius )  ;; get agent IDs. 
+  let inconeagents nobody
+  let isincone false
+  let list-incone []
+  let myx xcor
+  let myy ycor
+  let myz zcor
+  let myp pitch
+  let my-head-x 0
+  let my-head-y 0
+  let my-head-z 0
+  let mywho who
+
+  set sensing-angle ( sensing-angle / 2.0 )
+    ;; note that a heading of 0 is straight down the y axis. 10 degrees is slightly clockwise of this. 
+  let direction-x ( - sin ( heading ) )   ;; x axis component of heading. 
+  let direction-y ( - cos ( heading ) )   ;; y axis component of heading. 
+  let direction-z 0
+  
+  ifelse ( pitch = 270 )
+  [
+    set direction-z 1
+    set direction-x 0
+    set direction-y 0
+  ]
+  [
+    ifelse ( pitch = 90 )
+    [
+      set direction-z -1 
+      set direction-x 0
+    set direction-y 0
+    ] 
+    [
+       set direction-z ( sqrt ( (direction-x ^ 2) + (direction-y ^ 2) ) ) * (- tan (pitch))
+    ]
+  ]
+  ;let direction-z ( sqrt ( (direction-x ^ 2) + (direction-y ^ 2) ) ) * (- tan (pitch))
+  let direction-length sqrt ( (direction-x ^ 2) + (direction-y ^ 2) + (direction-z ^ 2) )
+  
+  let towardsheadx direction-x / direction-length
+  let towardsheady direction-y / direction-length
+  let towardsheadz direction-z / direction-length
+  
+  foreach agents-in-radius 
+  [    
+    let default "no"
+    let default-v 0
+    let new "no"
+    let new-v 0
+    
+    let targetx [xcor] of turtle ?
+    let targety [ycor] of turtle ?
+    let targetz [zcor] of turtle ?
+    
+    let towardstargetx myx - targetx  ; relative to the target
+    let towardstargety myy - targety
+    let towardstargetz myz - targetz
+
+    let angle-between -999    
+
+      ;; calculates the angle between two vectors. the following formula is used:
+      ;; angle = acos ( (vecA * vecB) / ( length(vecA) * length(vecB) ) )
+      ;; vecA = towardshead
+      ;; vecB = towardstarget
+    let VtW ((towardsheadx * towardstargetx) + (towardsheady * towardstargety) + (towardsheadz * towardstargetz))
+    let BVtBW ((sqrt((towardsheadx * towardsheadx) + (towardsheady * towardsheady) + (towardsheadz * towardsheadz))) 
+             * (sqrt((towardstargetx *  towardstargetx ) + (towardstargety * towardstargety) + (towardstargetz * towardstargetz)))) 
+    
+    if (BVtBW != 0)
+      [
+      ifelse ( ( (VtW / BVtBW ) ) > 1.0 )
+        [set angle-between 1] ;; because of rounding errors it may happen that the value is greater than 1 although this is not possible
+        [set angle-between  acos (VtW  / BVtBW)]
+ 
+      if (sensing-angle > angle-between) and (distance-nowrap turtle ? < (range / patchlength))
+        [set inconeagents (turtle-set inconeagents turtle ?) ]
+      ]
+  ]
+  report inconeagents
+end
+
+
+;; ###########################################################################
+;; #      
+;; #  This is an alternative for the above procedure. It is more efficient, and simpler to understand. It gives the same results as the previous
+;; #  version in over 98.5% of cases. The discrepancy lies in how the cone is represented. Whereas the above method (is believed to) constitute a circular cone,
+;; #  this procedure implements a cubic cone (as in a pyramid), with the sensing angle being maintained through each of two dimensions and extended out from the AUV along a third. 
+;; #
+;; #  Establishes which agents are within a cone of perception of current turtle. The cone's orientation is implicit, along the current heading of the turtle. 
+;; #  Hence, to sense in any other direction, the turtle must be turned/pitched, this procedure called, and the turtles direction reset. 
+;; #
+;; #  Note that a heading of 0 degrees points straight up the Y axis. A pitch of 0 degrees also points straight up the Y axis. Positive pitch tilts the nose up, increasing
+;; #  heading turns the turtle clockwise. 
+;; #
+;; #  input: the direction in which the sensor is mounted on robot, its pitch on robot, the range of the sensor, the angle of the visible cone.
+;; #  output: 0V = no robot in sight, 5V = robot is next to another. 
+;; #                                                                         
+;; ###########################################################################
+to-report pyramid-AUVs-in-cone [ agentset-in-radius radius sensing-angle ]
+  let in-cone-agents nobody
+  set sensing-angle (sensing-angle / 2.0)              ;; agent looks stright down the centre of the sensing angle. 
+  let agents-in-radius ([who] of agentset-in-radius )  ;; get agent IDs. 
+  let my-patch patch-here                              ;; used to check whether two agents occupy the same patch
+
+  foreach agents-in-radius                             ;; check each other agent in range if it is in the cone. 
+  [ 
+    let agent-is-in-cone false                         ;; by default agent is not in cone. This must be set to true for it to be included.   
+    let agent-patch [patch-here] of turtle ?           ;; the patch of the other turtle
+    ifelse (my-patch = agent-patch)                    ;; the towards-pitch and towards procedure (used below) do not work of the two patches are the same...                                                       
+      [ set agent-is-in-cone true ]                    ;; ... hence, if two turtles are in the same patch, then they are assumed to be in the cone
+      [                                                ;; otherwise, the pitch and heading of one agent from the other is calculated, and these are compared to the 
+                                                       ;; sensing-angle to determine if one agent can see the other.                       
+        let pitch-me-to-agent towards-pitch turtle ?   ;; the pitch of the target agent from the current agent.
+        let diff-pitch (abs(subtract-headings pitch pitch-me-to-agent)) ;; the absolute difference in pitch between where the current agent is pointing, and where the other agent is. 
+                                                       ;; Pitch is from 0-360 degrees, just as heading. There is no subtract-pitch method, 
+                                                       ;; so make use of substract-headings (which works on 0 to 360). 
+        if (diff-pitch <= sensing-angle)               ;; whether or not the agent is in the pitch sensing angle. If it isn't, then agent definitely not in cone.  
+        [
+          ;; if two patches have the same x and y coordinates (different z), then 'towards' cannot be used. This deals with that case. 
+          ifelse( ([pxcor] of my-patch = [pxcor] of agent-patch) and ([pycor] of my-patch = [pycor] of agent-patch) ) 
+            [ set agent-is-in-cone true ]              ;; agent is in cone if it is in the pitch-view, and patch has same x and y coordinates 
+            [
+              let heading-me-to-agent towards turtle ?       ;; the heading of the target agent from the current agent
+              let diff-heading (abs(subtract-headings heading heading-me-to-agent)) ;; the absolute difference in heading between where current agent is pointing, and where the other agent is. 
+
+              set agent-is-in-cone (diff-heading <= sensing-angle) ;; agent in cone if it is in both the pitch view and heading view.
+            ]
+        ]
+      ]
+      
+      if agent-is-in-cone [ set in-cone-agents (turtle-set in-cone-agents turtle ?) ]
+  ]
+  report in-cone-agents
+end
+
+
+to-report own-in-radius [range] ; reports an agentset with all other robots who are inside a sphere with a radius of range1
+  
+let AUVs-in-radius all-robots with [(who != [who] of myself) and ((distance-nowrap myself) < range)]
+report AUVs-in-radius
+
+; the following is new code that lets the AUVs see if the basestation is near via their passive blue-light sensors, i.e. the basestation is emitting blue light
+;ifelse ((any? basestations-DUMMY) and (basestations-seen-by-passive-sensor?)) ; if the basestation is equipped with blue-light emitters, it can be seen by the AUVs
+;  [
+;  let basestations-in-radius basestations-DUMMY with [((distance-nowrap myself) < range)]    
+;  let AUVs-and-basestations-in-radius (turtle-set AUVs-in-radius basestations-in-radius) 
+;  ;if (ticks mod 20 = 0) [print AUVs-and-basestations-in-radius]
+;  report AUVs-and-basestations-in-radius 
+;  ]
+;  [
+;  report AUVs-in-radius     
+;  ]
+end

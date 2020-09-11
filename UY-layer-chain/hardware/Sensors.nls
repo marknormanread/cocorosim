@@ -1,0 +1,302 @@
+; This file contains procedures related to the sensors that appear on AUVs. The same sensor type may be used on multiple AUVs, 
+; for example the test platform and the final SSSA-built AUV, as such they are commonly abstracted to this source file. 
+;
+
+;; ###########################################################################
+;; Identifies the nearest AUV within a sensor cone. 
+;;   s-heading:  the heading of the sensor relative to the AUV
+;;   s-pitch:    the pitch of the sensor relative to the AUV
+;;   s-range:    the range of perception of the sensor
+;;   s-aperture: the opening of the cone
+;; ###########################################################################
+to-report sensor-BL-nearest-AUV [s-heading s-pitch s-range s-aperture] ;; the physical simulation of the passive distance sensor
+  let dist s-range  ;; the default return value. 
+  let range-in-patches s-range / patchlength              ;; convert from meters into patch lengths
+  set near-robots (own-in-radius (range-in-patches * 1.1));; simulation speed enhancement; for a more efficient sensor calculation, only use other robots which are close. 
+ 
+  right s-heading  ;; re-orient the robot to direct cone along line of sensor. 
+  tilt-up s-pitch
+  let agents-in-cone ( AUVs-in-cone near-robots s-range s-aperture )  ;; will detect turtles in general, not just AUVs. 
+  tilt-down s-pitch
+  left s-heading  ;; re-orient robot to its original heading. 
+
+  let seen-robots no-turtles
+  if agents-in-cone != nobody
+  [
+    set seen-robots (( agents-in-cone ) with [is-robot? or is-base?])   ;; select only those agents that are robots (eg, not water surface); basestations are only in the agents-in-cone (or before in the near-robots) agentset if the basestations-seen-by-passive-sensor? is set TRUE in the experiment file
+  ]
+  
+  let nearest-robot nobody
+  if (any? seen-robots) 
+  [
+    set nearest-robot one-of (seen-robots with-min [distance myself])
+  ]
+  report nearest-robot
+end
+
+
+;; ###########################################################################
+;; #                                                                         
+;; #  Blue light sensor, which detects other blue light sensors (on other AUVs).                                  
+;; #  input: the direction in which the sensor is mounted on robot, its pitch on robot, the range of the sensor, the angle of the visible cone.
+;; #  output: distance to nearest AUV in cone, in meters. If nothing is observed, the sensor range is returned.
+;; #                                                                         
+;; ###########################################################################
+to-report sensor-bluelight-distance [s-heading s-pitch s-range s-aperture] ;; the physical simulation of the passive distance sensor
+  
+  let nearest-robot sensor-BL-nearest-AUV s-heading s-pitch s-range s-aperture
+  let dist s-range                                     ;; the default return value
+  
+  if nearest-robot != nobody
+  [
+    set dist distance nearest-robot * patchlength      ;; get the distance (which is in patches), and scale onto meters
+    set dist dist * (0.8 + (random-float 0.2))         ;; introduce some noise into the measurement
+  ] 
+  report dist ;; distance reported in meters. 
+end
+
+
+
+
+
+;; ###########################################################################
+;; Author (if you have any questions) : Mark
+;;
+;;  Procedure for calculating distance of AUV to wall, given the direction, range and aperture of active sensors. 
+;;  This information is used to calculate 3 angles:
+;;   * the direction the sensor is pointing in,  (eg, 35 degrees)
+;;   * the direction that the bigger extreme of the sensor's vision (given the aperture) is pointing in (eg, 35 + 45 (half aperture) degrees)
+;;   * the direction that the smaller extreme of the sensor's vision (given the aperture) is pointing in (eg, 34 - 45 (half aperture) degrees)
+;;
+;; These three directions are used to gage which walls the sensor can see - a helper function is used for this calculation. Using right angle
+;; triangles, the distance to the wall (whichever wall that might be) along the given angle is calculated. 
+;;
+;; This procedure should do away with many of the bugs seen in other procedures attempting to do active wall detection, if a sensor sees part of a 
+;; wall, perhaps only on the peripheral of its vision, the distance will be reported, however it will be the actual distance, not the normal to the wall. 
+;;
+;; It should however be noted that whilst this procedure should (I hope) be quite acturate, it is not perfect. It operates on taking 3 estimates of
+;; what a sensor can see, but if an AUV is pointing at a wall, but perhaps 10 degrees of the normal (lets say, facing north wall, with a heading of 10)
+;; then the estimate will be close, but not perfect. 
+;;
+;; A last note, this requires that the aperture of the sensors be knonw. RobotModel currently assumes these to be 90 degrees, however if that is
+;; not realistic, it can be changed, and this algorithm should still work. 
+;;
+;; Procedure returns the distance in meters, reporting the sensor range if nothing is seen. 
+;; 
+;; ###########################################################################
+to-report sensor-active-border-distance [s-heading s-range aperture]
+    
+  let sensor-global-heading (heading + s-heading) mod 360   ;; s-heading represents the orientation of the sensor in the x-y plane, this accounts for both sensor and robot orientation
+  let sensor-min-aperture (sensor-global-heading - (aperture / 2)) mod 360 ;; half the aperture further around
+  let sensor-max-aperture (sensor-global-heading + (aperture / 2)) mod 360 ;; half the aperture back around
+
+  let distances (list (calculate-distance-to-wall sensor-global-heading) ;; calculate the distances from each of these angles to the wall they are pointing at.
+                       (calculate-distance-to-wall sensor-min-aperture)
+                       (calculate-distance-to-wall sensor-max-aperture)
+                )  
+  
+  let closest (min distances) * patchlength     ;; find the smallest of the distances, and scale patches onto meters
+  ifelse closest < s-range
+  [ report closest ]
+  [ report s-range ]
+end
+
+;; ###########################################################################
+;; Author (if you have any questions) : Mark
+;; 
+;; This is a helper procedure for calculating the distance between the AUV, and the wall at the given angle. 
+;; It operates by identifying which wall the angle is pointing at (north, east, south, west). A triangle is formed
+;; between the AUV, the normal to the wall (the shortest distance, always 90 degrees from the wall), and the distance
+;; from the AUV to the wall given the angle (the hypothenuse of the triangle, this is the distance we are interested in).
+;; The 'tan' function is used to calculate hte opposite length of the triangle, and pythagoras's rule is used to 
+;; then calculate the distance to the wall from the AUV, along the given angle. 
+;;
+;; Note that the angle (parameter) is given
+;; in absolute netlogo terms, not relative to the AUV. Hence, 0 degrees is north, not where the AUV is facing. 
+;;
+;; ###########################################################################
+to-report calculate-distance-to-wall [ angle ]
+    ;; atan converts x and y offsets to a turtle heading in degrees (from 0 to 360).
+    ;; the angle from the AUV to each tank corner. This will be given in 0 to 360 degrees, and are not adjusted for 
+    ;; the direction the angle is facing. (they are absolute with respect to north) 
+  let angle-to-NW ((atan (min-pxcor - xcor) (max-pycor - ycor))) mod 360        
+  let angle-to-NE ((atan (max-pxcor - xcor) (max-pycor - ycor))) mod 360        
+  let angle-to-SE ((atan (max-pxcor - xcor) (min-pycor - ycor))) mod 360        
+  let angle-to-SW ((atan (min-pxcor - xcor) (min-pycor - ycor))) mod 360        
+
+  if (angle >= angle-to-NW) or (angle < angle-to-NE) ; angles are reported from 0 to 360, hence, if its greater than (around)
+  [  ;; angle pointing at north wall 
+    let adjasent max-pycor - ycor
+    let alpha angle
+    let opposite (tan alpha) * adjasent
+    let hyp sqrt((adjasent ^ 2) + (opposite ^ 2))
+    report hyp
+  ]
+  if (angle >= angle-to-NE) and (angle < angle-to-SE)
+  [
+    ;; angle pointing at east wall 
+    let adjasent max-pxcor - xcor
+    let alpha subtract-headings angle 90  ;; the smallest movement to get from the first to the second. 
+    let opposite (tan alpha) * adjasent
+    let hyp sqrt((adjasent ^ 2) + (opposite ^ 2))
+    report hyp
+  ]
+  if (angle >= angle-to-SE) and (angle < angle-to-SW)
+  [  ;; angle pointint at south wall
+    let adjasent ycor - min-pycor
+    let alpha subtract-headings angle 180
+    let opposite (tan alpha) * adjasent
+    let hyp sqrt((adjasent ^ 2) + (opposite ^ 2))
+    report hyp
+  ]
+  if (angle >= angle-to-SW) and (angle < angle-to-NW)
+  [
+    ;; angle pointing at west wall
+    let adjasent xcor - min-pxcor
+    let alpha subtract-headings angle 270
+    let opposite (tan alpha) * adjasent
+    let hyp sqrt((adjasent ^ 2) + (opposite ^ 2))
+    report hyp
+  ]
+end
+
+
+
+
+;; ###########################################################################
+;; #                                                                         
+;; #  Senses the distance of an AUV to the ground.                                     
+;; #  input: the range of the sensor.                                              
+;; #  output: 5V = AUV on bottom. 0V = no ground sensed within range. 
+;; #                                                                         
+;; ###########################################################################
+to-report sensor-ground-distance-value-volts [s-range] ; the physical simulation of a passive distance sensor; reports exact (patch-)distance to ground; very rough sensor, should be adapted by hardware partner (sonar?)
+  
+  ifelse (patch-ground-distance <= s-range) 
+    [report 0]
+    ;[report (5 - ((patch-ground-distance / s-range) * 5))] 
+    [report 0]
+end
+
+
+;; ###########################################################################
+;; #                                                                         
+;; #  The presure sensor on the robots.                                     
+;; #  input: a multiplier relating depth to voltage.                                              
+;; #                                                                         
+;; ###########################################################################
+to-report sensor-pressure-value-volts [z-coordinate-to-pressure-ratio] ; the physical simulation of the depth sensor
+
+  let value 0
+  let volt-ratio (5 / water-level) ; maximum 5V output
+  
+  set value (pressure * volt-ratio * (0.9 + (random-float 0.2))) ; volt values are approximately the (#patches below water surface*volt-ratio)
+                                                                 ; the values are discrete because the pressure values are taken from the 
+                                                                 ; depth of waterpatch, and not the continuous value of the AUV's exact z-coordinate.
+  if (value > 5) [set value 5]
+  if (value < 0) [set value 0]
+    
+  report value ;reported value in volt. min depth = 0V, max depth = 5V;
+end
+
+
+;; ###########################################################################
+;; #                                                                         
+;; #  The acoustic counter sensor on the robots.                                     
+;; #  input: the sensor's range.                                             
+;; #  output: the proportion of total robots (excluding self) that are within the specified range. 
+;; #          5V = all other robots in the simulation are within range. 0V none of the other robots are. 
+;; #                                                                         
+;; ###########################################################################
+to-report sensor-acoustic-counter-value-volts [a-range] ; the physical simulation of the acoustic counter sensor (that counts the near other AUVs)
+  
+  let value 0
+  
+  if (number-of-all-robots > 1) [ ; this sensor is only useful if there are more than 1 robot, else the calculation divides by zero (=error).
+  set value (count (own-in-radius a-range)) / (number-of-all-robots - 1) * 5  ; all other robots without myself 
+  ]
+  report value ; reported value in volts: all other robots near = 5 V; no other robots near = 0V; exact values
+end
+
+
+;; ###########################################################################
+;; #                                                                         
+;; #  The acoustic distance-to-basestation sensor on the robots. Used for confinement (or "virtual fence").                                     
+;; #  input: the sensor's range.                                             
+;; #  output: the distance to the base-station. 
+;; #          0V = next to base-station. 5V = basestation out of sensor range. 
+;; #                                                                         
+;; ###########################################################################
+to-report sensor-acoustic-distance-value-volts [a-range] ; the physical simulation of the acoustic distance sensor (that reports the distance to the basestation)
+  
+  let value 0
+
+  if (count basestations-DUMMY > 0) ; sensor only works if there are basestations
+    [
+    set value ((distance one-of basestations-DUMMY) / a-range) * 5; value = distance to basestation; as of now there is only one basestation
+    if (value > 5) [set value 5] ; if base-station is out of sensor-range 
+    ]
+  
+  report value ; reported value in volts: next to base-station = 0V; basestation out of sensor range = 5V; exact values
+end
+
+
+
+;; ###########################################################################
+;; #                                                                         
+;; #  Compass sensor                               
+;; #  output: 0V = north, 1.20 = east, 5V = almost North.
+;; #                                                                         
+;; ###########################################################################
+to-report sensor-compass 
+
+  report 5 * (heading / 360)
+
+end
+
+;; ###########################################################################
+;; #                                                                         
+;; #  Electric field sensor! RAW-DUMMY THIS SENSOR DOES NOT HAVE ANY PHYSICAL PROPERTIES OF ANY REAL SENSOR!!!!!!!!!!!!!!!!!!!                               
+;; #
+;; #                                                                         
+;; ###########################################################################
+to-report electric-field
+
+  report (5 * electric-value) / 100
+
+end
+
+
+;; ###########################################################################
+;; #                                                                         
+;; #  Environment chemical sensor!                              
+;; #  output: 0V = minimal (=0) concentration on this patch, 5V = maximum or above maximum concentration on this patch
+;; #                                                                         
+;; ###########################################################################
+to-report sensor-chemical
+  
+  report chemical-concentration
+
+end
+
+
+;; ###########################################################################
+;;
+;; THIS FUNCTION IS DEPRICATED. There is now an OS procedure that performs this function. 
+;;
+;; An active distance sensor (combination of blue light and associated light intensity sensor) on bottom of platform. 
+;;
+;; Note that this sensor implementation measures only the distance to the ground directly underneath it. There is no notion of 
+;; an aperture of vision. It is made more computationally lightweight by pre-processing each patch's distance from the ground
+;; directly beneath it (see simcore), but as such provides a resolution of the patch length. 
+;;
+;; 0V = no ground in sight. 5V = robot is on the ground.
+;; ###########################################################################
+to-report sensor-active-ground-distance-value-volts [ sensor-range ]
+  ifelse ground?   ;; check AUV not currently in (!) the ground
+  [
+    ifelse patch-ground-distance > sensor-range
+    [ report 0 ]
+    [ report 5 * (1 - (patch-ground-distance / sensor-range)) ]
+  ][ report 5 ]
+end

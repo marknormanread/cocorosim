@@ -1,0 +1,123 @@
+;;======================================================
+;; Experiment file responsible for relay chain formation
+;;======================================================
+
+__includes[
+  "../controller/UY-layer-chain.nls"
+  "../environment/pool.nls"
+  ;"../environment/reptile_tank.nls"  
+] 
+
+globals [  
+  water-level 
+  make-ground-terrain? 
+  make-borders? 
+  make-watersurface? 
+  stop-on-obstacle-collisions?
+  print-AUV-collisions?
+  confinement-behaviour?
+]
+
+
+
+to experiment-setup ; this is called by the "setup" main procedure 
+  setup-environment-dimensions
+  
+  set confinement-behaviour? false ; if TRUE, the AUVs try to stay inside a certain distance to the (nearest) basestation (= vitual fence).
+  set stop-on-obstacle-collisions? false ; if TRUE, the AUV stops when it is located on a borderpatch or a groundpatch
+  set print-AUV-collisions? true ; if TRUE, the simulation prints the turtle identifier and "collision" string in the command center if two AUVs are located on the same patch
+  
+  set make-ground-terrain? false
+  set make-borders? true
+  set make-watersurface? false
+  set water-level 20 ; z-coordinate of the water surface above the bottom;  
+  core-setup-world ; the world (ground, water, water surface, borders) is created; must exist after set waterlevel & number-auvs
+  core-setup-physics ; physical parameters of the world and the AUVs are loaded
+  
+  experiment-setup-robots ; robots are set up and created
+  ask turtles [ set physics-stop false ] 
+  set number-of-all-robots (count AUVs-DUMMY) ;; a convenience variable that holds the total number of AUV robot
+  
+      ;; set up the camera  
+  setxyz -0 -10 25 ; sets the position of camera ; user
+  face patch 0 2 0  ; sets the heading of camera ; user
+  zoom -60 ; sets the zoom of camera ; user
+  
+  set OS_show_LEDs 0  
+end
+
+
+
+to experiment-setup-robots
+  
+  repeat layers * layer-AUVs; this number defines the number of a certain AUV type that should be created
+  [
+    robotmodel-create-AUV-Lily one-of patches with 
+      [water? ;and (count AUVs-DUMMY-here) + (count AUVs-Lily-here) + (count AUVs-Jeff-here) = 0
+        ;and (pzcor < 10) and (pzcor > 0) 
+        and (pzcor = 18)
+        and (pxcor > -3) and (pxcor < 3)
+        and (pycor > -3) and (pycor < 3)
+      ]       
+  ]
+
+  let depth -0.5
+  let l 0   ;; layers
+  while [ l < layers ]
+  [ 
+    let r layer-AUVs * l
+    while [ r < layer-AUVs * (l + 1) ]
+    [
+      ask turtle r 
+      [ 
+        set chain-layered true
+        set chain-layer-depth  depth
+        set color red
+      ]
+      set r r + 1
+    ]
+    set l l + 1
+    set depth depth - 0.25
+  ]
+  
+  
+  ask AUVs-Lily
+  [ 
+    controller-setup
+  ]
+  
+  ask AUVs-Lily with-max [ chain-layer-depth ]
+  [ set chain-stationary true ]
+
+;  ask AUVs-Lily with [who = 0]
+;  [  ;; this AUV will seed the chain   
+;    controller-setup
+;    set chain-state "link"
+;    set chain-link-next-id -1
+;    set chain-link-prev-id -1
+;  ]
+ 
+
+  set all-AUVs (turtle-set AUVs-DUMMY AUVs-Lily AUVs-Jeff) ; all the robots (= different AUV types + base stations) are put into an agentset; used for interaction with agents 
+  set all-base-stations (turtle-set basestations-DUMMY basestations-DUMMY)
+  set all-robots (turtle-set all-AUVs all-base-stations)  
+end
+
+to experiment-startup
+  
+end
+
+
+
+
+to experiment-go-first ; function has to exist; before all turtles and patches have acted
+end 
+
+
+to experiment-go-last ; function has to exist; after all turtles and patches have acted 
+end 
+
+
+
+to experiment-update-world ; function has to exist; here all the things that happen each tick in the environment should be performed
+end

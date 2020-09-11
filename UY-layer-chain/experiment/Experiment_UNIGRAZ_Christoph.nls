@@ -1,0 +1,180 @@
+; Experimentation user file
+ 
+globals [  
+  water-level 
+  make-ground-terrain? 
+  make-borders? 
+  make-watersurface? 
+  stop-on-obstacle-collisions?
+  print-AUV-collisions?
+  confinement-behaviour?
+  ;make-ground-dell?
+  measure-swarmsize?
+  basestations-seen-by-passive-sensor?
+  chemical-leak?
+  mean-dist
+]
+
+
+to experiment-setup ; this is called by the "setup" main procedure 
+  setup-environment
+  
+  set confinement-behaviour? false ; if TRUE, the AUVs try to stay inside a certain distance to the (nearest) basestation (= vitual fence).
+  set measure-swarmsize? false
+  set basestations-seen-by-passive-sensor? false
+  set chemical-leak? true
+  
+  set stop-on-obstacle-collisions? true ; if TRUE, the AUV stops when it is located on a borderpatch or a groundpatch
+  set print-AUV-collisions? false ; if TRUE, the simulation prints the turtle identifier and "collision" string in the command center if two AUVs are located on the same patch
+  
+  ;set use-blackbox? true ;if TRUE, a black-box is being created, which produces an electrical field.
+   
+  set make-ground-terrain? false
+  set make-ground-dell? false
+  set make-borders? true
+  set make-watersurface? false
+  set water-level 20 ; z-coordinate of the water surface above the bottom;  
+  core-setup-world ; the world (ground, water, water surface, borders) is created; must exist after set waterlevel & number-auvs
+  
+  core-setup-physics ; physical parameters of the world and the AUVs are loaded
+  
+  experiment-setup-robots ; robots are set up and created
+  set number-of-all-robots (count AUVs-DUMMY) ;; a convenience variable that holds the total number of AUV robot
+
+if (confinement-behaviour?)
+  [
+  ask patches with [ground? and ((distancexy 0 0) > (0.75 * 45))] [set pcolor brown + 1]
+  ask patches with [ground? and ((distancexy 0 0) > 45)] [set pcolor brown]
+  ]
+
+if (false)
+  [
+  ask patch 0 0 0 [sprout-black-boxes 1 ]   ;blackbox is created
+  ask black-boxes 
+    [
+    set is-robot? false
+    set shape "box"
+    set color black
+    ask patch-here [set electric-value 100]
+    ]
+    ask patches with [water? = true]
+      [
+      let neighbor-with-max-electric (max-one-of patches in-radius-nowrap 2 [electric-value]) 
+      let value-of-neighbor-with-max-electric ([electric-value] of neighbor-with-max-electric)
+          
+      if (electric-value < value-of-neighbor-with-max-electric) [set electric-value value-of-neighbor-with-max-electric - 10]
+       ]
+  ]
+
+
+  
+  ;setxyz -10 -40 80 ; sets the position of camera ; user
+  ;face patch 0 0 0  ; sets the heading of camera ; user
+  ;zoom -60 ; sets the zoom of camera ; user
+  reset-perspective
+  zoom 120
+
+
+end
+
+
+to experiment-setup-robots
+  
+  let starting-patches patches with [water? and (pzcor < 0.7 * max-pzcor) and (pzcor > 0.3 * max-pzcor) and (pxcor > -0.1 * max-pxcor) and (pxcor < 0.1 * max-pxcor) and (pycor > -0.1 * max-pycor) and (pycor < 0.1 * max-pycor)] ; DUMMY AUVs are created and placed on random water patches at a certain depth in the tank
+  repeat 7 ; this number defines the number of a certain AUV type that should be created
+    [
+    robotmodel-create-AUV-DUMMY one-of starting-patches with [count turtles-here = 0]
+    ]  
+  
+  ask AUVs-DUMMY [HAL-setup] ; the HAL is initialized
+  ask AUVs-DUMMY [Controller-setup] ; the controller is initialized
+
+  ;robotmodel-create-basestation-DUMMY patch 0 0 (water-level - 2) ; 1 basestation DUMMY is created in the middle on the water surface; as of now it is set to (is-robot? = false) because it does not have any sensors or actuators yet and it does not have the same sensors as the AUVs
+  
+  ;robotmodel-create-basestation-DUMMY patch 30 30 (water-level - 2)
+  ;robotmodel-create-basestation-DUMMY patch 0 -40 (water-level - 2) 
+  
+  set all-robots (turtles with [is-robot?]) ; all the robots (= different AUV types + base stations) are put into an agentset; used for interaction with agents 
+end
+
+
+to experiment-startup ; function has to exist; called once the go button is pressed, after the arena and the robots are created
+  
+  if (confinement-behaviour?) ; if the confinement-behaviour is set to TRUE in the experiment.nls, set some things for evaluation 
+    [
+    ask water-surfaces with [(distancexy 0 0) > (0.7 * 30)] [set color yellow]
+    ask water-surfaces with [(distancexy 0 0) > 30] [set color white]
+    ]
+
+if (chemical-leak?)
+[
+print "setting up plume gradient. takes 1 minute"  
+
+ask patches with [water?] [set chemical-concentration (250 - (distancexyz-nowrap -60 -60 0))]
+;let diff-counter 0
+;repeat 500
+;[
+;ask patch -60 -60 1 [set chemical-concentration chemical-concentration + 300 set pcolor green]  
+;ask patches with [border? or ground? ] [set chemical-concentration 0] ;
+;
+;
+;;if (ticks mod (5) = 0) [ask patches [set chemical-concentration [chemical-concentration] of patch-at 0 -1 0]]
+;;if (ticks mod (3) = 0) [ask patches [set chemical-concentration [chemical-concentration] of patch-at -1 0 0]]
+;;if (ticks mod (7) = 0) [ask patches [set chemical-concentration [chemical-concentration] of patch-at 0 0 -1]]
+;experiment-diffuse-chemical-concentration
+;set diff-counter diff-counter + 1
+;
+;if (diff-counter mod 50 = 0) 
+;  [
+;  print diff-counter
+;  ask patches with [ground?] [set pcolor [chemical-concentration] of patch-at 0 0 7]
+;  ]
+;]
+
+;ask patches with [chemical-concentration > 0.1] [set pcolor scale-color red chemical-concentration 0 0.5]
+;ask patches with [ground?] [set pcolor [chemical-concentration] of patch-at 0 0 7]
+]
+
+;ask patches with [water?] [set chemical-concentration (pycor + 60) ^ 2]
+
+   
+end
+
+
+to experiment-go-first ; function has to exist; before all turtles and patches have acted
+end 
+
+
+to experiment-go-last ; function has to exist; after all turtles and patches have acted 
+end
+
+
+to experiment-update-world ; function has to exist; here all the things that happen each tick in the environment should be performedif (chemical-leak?)
+
+set mean-dist 0
+;if (ticks mod 100 = 0) 
+;  [
+  ask AUVs-DUMMY [set mean-dist mean-dist + distancexyz-nowrap -60 -60 0] 
+  set mean-dist round (mean-dist / number-of-all-robots)
+;  print mean-dist
+;  ]
+end
+
+
+
+to experiment-diffuse-chemical-concentration
+
+
+ask patches with [chemical-concentration > 0.1]
+  [
+  ask patch-at 0 1 0 [set chemical-concentration (chemical-concentration + 0.19 * [chemical-concentration] of myself)] 
+  ask patch-at 0 -1 0 [set chemical-concentration (chemical-concentration + 0.01 * [chemical-concentration] of myself)]    
+  ask patch-at 1 0 0 [set chemical-concentration (chemical-concentration + 0.13 * [chemical-concentration] of myself)]    
+  ask patch-at -1 0 0 [set chemical-concentration (chemical-concentration + 0.07 * [chemical-concentration] of myself)] 
+  ask patch-at 0 0 1 [set chemical-concentration (chemical-concentration + 0.11 * [chemical-concentration] of myself)]         
+  ask patch-at 0 0 -1 [set chemical-concentration (chemical-concentration + 0.09 * [chemical-concentration] of myself)]     
+
+  set chemical-concentration (chemical-concentration * 0.4)
+  ]
+  
+end  

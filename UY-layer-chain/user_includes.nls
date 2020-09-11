@@ -1,0 +1,10 @@
+;; Mark's included experimentation files. This file SHOULD NOT be checked into svn. 
+;; I can comment in and out files that I am working on to run different experiments and set ups, 
+;; knowing that they will not be over-written if anyone changes the cocorosim.nlogo file. 
+;;
+
+__includes [
+  "experiment/experiment-layer-chain.nls"
+  ;"experiment/experiment_MR_boids_profiling.nls" 
+  ;"experiment/experiment_GrazShoal.nls"
+]

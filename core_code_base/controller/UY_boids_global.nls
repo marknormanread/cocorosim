@@ -1,0 +1,415 @@
+;;====================================================
+;;====================================================
+;;
+;; UY's implementation of BIODS. 
+;; 
+;; In boids, each boid follows the following three rules:
+;; 1) Collision avoidance, avoid collisions with nearby objects
+;; 2) Velocity matching, try to match velocity with nearby boids. 
+;; 3) Flock centering, try to stay close to nearby boids. 
+;;
+;; Orginal boids implementation found on this webpage: http://www.red3d.com/cwr/boids/
+;;
+;;====================================================
+;;====================================================
+__includes[ 
+  "UY_boids_global_params.nls"
+]
+ 
+turtles-own 
+[  
+  ;; these variables comprise a vector indicating the perceived center of the swarm, relative to the current AUV
+  cohesion-sideways ;; positive numbers are right, negative are left
+  cohesion-forward  ;; positive numbers are forward, negative are back
+  cohesion-up       ;; positive numbers are up, negative are down. 
+  
+  ;; these variables comprise a vector of prefered movement to avoid hitting other AUVs. 
+  separation-sideways
+  separation-forward
+  separation-up
+  
+  ;; these variables comprise a vector of preferred movement to match the velocity of other AUVs seen around it (through blue light sensors)
+  alignment-sideways
+  alignment-forward
+  alignment-up
+
+  swarm-in-range         ;; used to indicate when the swarm is sensed within range. AUVs may remain stationary under two conditions, 
+                         ;; the swarm-related forces acting upon it dictate that it should remain so, or it cannot perceive any of the swarm, 
+                         ;; and so remains still. In the latter case, this variable is set to ensure the AUV moves. 
+  swarm-in-range-data-collection
+  
+  ;; these are temp stores of distance to other AUVs registered on the sensors, used to prevent unnecessary double computation
+  distance-front-right 
+  distance-front-left
+  distance-back 
+  distance-up  
+  distance-down
+  
+  ;; these are used in sensor-based alignment only
+  prev-dist-front-right
+  prev-dist-front-left
+  prev-dist-front
+  prev-dist-back
+  prev-dist-up
+  prev-dist-down
+]
+
+
+;;========================================================
+;; Called by the OS to step the controller. 
+;;========================================================
+to Controller-update
+  set distance-front-right  OS_sens_BL_front_right
+  set distance-front-left   OS_sens_BL_front_left
+  set distance-back         OS_sens_BL_back
+  set distance-up           OS_sens_BL_up
+  set distance-down         OS_sens_BL_down  
+  
+  ;;------------------------------
+  ;; Identify the boids in the boids' area
+  ;; Whether information is transmitted between neighbours globally (eg, using RF) or locally (eg, using bluelight). 
+  let neighbours []    ;; just the variable declaration  
+  ifelse boids-RF-info-share
+  [ ;; this is global information sharing
+    let all-neighbours own-in-radius (boids-observation-range / patchlength)  ;; find neighbours within radius, convert to patches (from meters) 
+    set neighbours AUVs-in-cone all-neighbours boids-observation-range boids-observation-angle  
+    if neighbours = nobody [ set neighbours (turtle-set nobody) ]
+  ] 
+  [ set neighbours OS_sens_auvs_BL ]                                          ;; this is local information sharing
+  ;;------------------------------
+  
+  ifelse count neighbours != 0
+  [  
+    set color yellow
+    set swarm-in-range true
+    
+    ;;------------------------------
+    ;; separation and cohesion require relative location of AUVs. This can either come from a global, perfect triangulation, or from 
+    ;; perception of distance on sensors. If sensors are used, then the orientation of an auv within the sensor cone is not possible. 
+    ;; This switches between the two. 
+    ifelse boids-BL-triangulation
+    [
+      calculate-cohesion-sensor-triangulation
+      calculate-separation-sensor-triangulation
+    ][
+      set boids-observation-angle 270   ;; if using global GPS, this creates a blind spot behind the AUV
+      calculate-cohesion   neighbours
+      calculate-separation neighbours
+    ]
+    ;;------------------------------
+    
+    ;;------------------------------
+    ;; alignment depends on deriving the velocities (heading and speed) of neighbouring AUVs and attempting to match them. The following options
+    ;; are investigated:
+    ;;
+    ;; 'all'   : velocities are communicated between AUVs in the neighbourhood. 
+    ;; 'none'  : no information is shared, and velocities are calculated based on changes in distance sensors. 
+    if boids-info-share = "all"
+    [ calculate-alignment  neighbours ]
+    if boids-info-share = "none"
+    [ calculate-alignment-sensor-triangulation ]
+    ;;------------------------------
+
+    ;; take averages, and normalise
+    let sum-weights (boids-cohesion-weight + boids-separation-weight + boids-alignment-weight)
+    let collective-forward (( (boids-cohesion-weight   * cohesion-forward  ) 
+                            + (boids-separation-weight * separation-forward) 
+                            + (boids-alignment-weight  * alignment-forward )) 
+                            /  sum-weights) 
+    let collective-sideways ((  (boids-cohesion-weight   * cohesion-sideways  ) 
+                              + (boids-separation-weight * separation-sideways) 
+                              + (boids-alignment-weight  * alignment-sideways )) 
+                              / sum-weights)
+    
+    let collective-up   ((  (boids-cohesion-weight * cohesion-up) 
+                           + (boids-separation-weight * separation-up) 
+                           + (boids-alignment-weight * alignment-up)) 
+                           /  sum-weights) 
+
+    ;; desired heading is relative to the boid. Desired speed is interpreted as a percentage of maximum thrust
+    let desired-heading calculate-desired-heading collective-forward  collective-sideways  ;; This is relative to the AUV
+    let desired-speed   calculate-desired-speed   collective-forward  collective-sideways 
+    set desired-speed min (list (boids-speed-scalar * desired-speed) boids-max-speed)  ;; upper limit on what desired speed can be
+      
+    OS_movement_arc (OS_orient_rel_to_abs_heading desired-heading) desired-speed boids-turn-gain
+   
+      ;; ensuring that values passed to buoyancy actuators do not exceed sensible values
+    set collective-up collective-up * 0.1
+    OS_buoyancy_set_speed collective-up 
+  ] 
+  [   ;; if no neighbours are percieved, colour red. OS will continue to drive AUV in same direction.
+    set color red 
+    set swarm-in-range false
+    OS_movement_arc (heading) (0.8 * boids-max-speed) boids-turn-gain
+  ] 
+end
+
+
+;;====================================================
+;; Calculates the center of the swarm.
+;;====================================================
+to calculate-cohesion [ neighbours ]
+  ;; list of x, y and z coordinates of neighbours
+  let xs [ xcor ] of neighbours   
+  let ys [ ycor ] of neighbours
+  let zs [ zcor ] of neighbours
+  
+  ;; the distance between current boid and the swarm centre. This is in absolute co-ordinates w.r.t. the environment. 
+  let diffx (median xs) - xcor
+  let diffy (median ys) - ycor
+  let diffz (median zs) - zcor
+  
+  ;; expressed relative to the AUV, based on headings. Pitch does not change, so diffz translates exactly
+  set cohesion-sideways ((cos heading) * diffx) + ((-1 * sin heading) * diffy)
+  set cohesion-forward  ((sin heading) * diffx) + ((cos heading) * diffy)
+  set cohesion-up       diffz
+end 
+
+;;====================================================
+;; Calculates the center of the swarm using sensor triangulation - distance but no exact angle.
+;;====================================================
+to calculate-cohesion-sensor-triangulation
+  let noise-threshold OS_bluelight_range * 0.95  ;; thresholding to avoid undesirable influence of sensor noise   
+  
+  ;; take local copy, since it is going to be modified, to prevent interference with other rules
+  let dist-front-right distance-front-right
+  let dist-front-left  distance-front-left 
+  let dist-back        distance-back       
+  let dist-up          distance-up         
+  let dist-down        distance-down       
+  
+  ;; distance indicators indicate maximum when there is nothing perceived. Thresholding places the center of the swarm on this AUV where that is the case 
+  if dist-front-right > noise-threshold  [  set dist-front-right 0  ]
+  if dist-front-left  > noise-threshold  [  set dist-front-left 0  ]
+  if dist-back        > noise-threshold  [  set dist-back  0  ]
+  if dist-up          > noise-threshold  [  set dist-up    0  ]
+  if dist-down        > noise-threshold  [  set dist-down  0  ]
+    
+    ;; based on what sensor observation and orientation, project onto forward-axis (relative to robot)
+  set cohesion-forward project-forward  60 0 1.0 dist-front-right
+                     + project-forward -60 0 1.0 dist-front-left
+                       
+  if boids-observe-backwards    ;; currently AUVs do not use information about the swarm behind them to calculate center
+  [ set cohesion-forward (cohesion-forward + project-forward 180 0 1.0 dist-back) ]
+  
+  set cohesion-sideways project-sideways 60 0  1.0 dist-front-right 
+                      + project-sideways -60 0 1.0 dist-front-left
+                      
+  set cohesion-up      project-up 0 90  1.0 dist-up 
+                     + project-up 0 -90 1.0 dist-down   
+end
+
+
+;;====================================================
+;; Computes the separation rule
+;;====================================================
+to calculate-separation [ neighbours ]
+  ;; these are calculated by considering each neighbouring boid in turn
+  set separation-sideways 0
+  set separation-forward 0
+  set separation-up 0
+
+  ask neighbours
+  [
+    let dist distance-nowrap myself   ;; distance from the neighbour to the calling current boid   
+    let infringement (boids-separation-threshold / patchlength) - dist   ;; quantity by which distance is less than the threshold
+    if infringement > 0  
+    [  ;; in this case the neighbour was closer than the threshold. Do nothing otherwise, because the neighbour is outside the threshold
+       let diffx xcor - [xcor] of myself  ;; these differences are absolute, not relative to the auv. Distance between infringing boid and current boid
+       let diffy ycor - [ycor] of myself
+       let diffz zcor - [zcor] of myself 
+             
+       let abs-pitch atan diffz (sqrt (diffx ^ 2) + (diffy ^ 2))   ;; the pitch angle to infringing boid from current boid
+       let abs-heading 0
+       if not (diffx = 0 and diffy = 0)    ;; safety, in case one AUV is directly above another. 
+       [     
+         set abs-heading atan (diffx) (diffy)  ;; absolute heading towards the infringing neighbour
+       ]       
+       ask myself ;; the following computations have to be done in the current boid, not the infringing boid
+       [         
+         let rel-heading OS_orient_abs_to_rel_heading abs-heading   ;; the heading to the infringing neighbour relative to the current boid
+ 
+         let inf-x (sin rel-heading) * (cos abs-pitch) * infringement  ;; calculate the vector of infringement past the thrshold in x,y,z planes RELATIVE TO BOID
+         let inf-y (cos rel-heading) * (cos abs-pitch) * infringement
+         let inf-z (sin abs-pitch) * infringement   
+         
+         set separation-sideways separation-sideways - inf-x  ;; sum this infringements to the final movement vector
+         set separation-forward separation-forward - inf-y
+         set separation-up separation-up - inf-z
+       ]       
+    ]
+  ]
+end
+
+;;====================================================
+;; Calculates the separation rule using sensor triangulation. Distance within a sensor cone is knwon, but the exact relative location/angle is not. 
+;;====================================================
+to calculate-separation-sensor-triangulation
+  set separation-sideways 0
+  set separation-forward 0
+  set separation-up 0
+  
+  ;; statements that check if AUV distance is closer than threshold.
+  ;; Infringements of AUVs closer than the threshold should result in the AUV moving away. As such, the projected 
+  ;; vector is SUBTRACTED from the avoidance-vector as it is compiled (rather than summed, as elsewhere).
+  if distance-front-right < boids-separation-threshold
+  [ set separation-forward separation-forward - project-forward 60 0 1.0 (boids-separation-threshold - distance-front-right) ] 
+    
+  if distance-front-left  < boids-separation-threshold
+  [ set separation-forward separation-forward - project-forward -60 0 1.0 (boids-separation-threshold - distance-front-left) ]
+  
+  if boids-observe-backwards and (distance-back < boids-separation-threshold)
+  [ set separation-forward separation-forward - project-forward 180 0 1.0 (boids-separation-threshold - distance-back) ]    
+  
+  if distance-front-right < boids-separation-threshold
+  [ set separation-sideways separation-sideways - project-sideways 60 0 1.0 (boids-separation-threshold - distance-front-right) ] 
+ 
+  if distance-front-left  < boids-separation-threshold
+  [ set separation-sideways separation-sideways - project-sideways -60 0 1.0 (boids-separation-threshold - distance-front-left) ]   
+  
+  if distance-up          < boids-separation-threshold
+  [  set separation-up separation-up - project-up 0 90 1.0 (boids-separation-threshold - distance-up) ]
+  
+  if distance-down        < boids-separation-threshold
+  [ set separation-up separation-up - project-up 0 -90 1.0 (boids-separation-threshold - distance-down) ] 
+end
+
+;;====================================================
+;; calculates the alignment rule using global triangulation. 
+;;====================================================
+to calculate-alignment [ neighbours ]
+  ;; obtain lists of each neighbours velocity in the x, y and z axes (this is in absolute space)
+  let vel-xs [ auv-velocity-x ] of neighbours
+  let vel-ys [ auv-velocity-y ] of neighbours
+  let vel-zs [ auv-velocity-z ] of neighbours
+  
+  ;; get the average velocity (in absolute space). Divide by patchlength because all the other measures are in patches, not meters. 
+  let abs-x median vel-xs / patchlength
+  let abs-y median vel-ys / patchlength
+  let abs-z median vel-zs / patchlength
+  
+  ;; calculate the average velocity relative to the boid
+  set alignment-forward    ((sin heading) * abs-x) + ((cos heading) * abs-y) 
+  set alignment-sideways   ((cos heading) * abs-x) + ((-1 * sin heading) * abs-y)
+  set alignment-up         abs-z
+end
+
+
+;;====================================================
+;; calculates the alignment rule using global triangulation. 
+;;====================================================
+to calculate-alignment-sensor-triangulation
+  let distance-front OS_sens_BL_front                      ;; the front-facing digital bluelight sensor
+  
+  ;; difference between current reading and previous reading. Positive numbers mean something moving away from the boid
+  let diff-fr   distance-front-right - prev-dist-front-right
+  let diff-fl   distance-front-left  - prev-dist-front-left
+  let diff-f    distance-front       - prev-dist-front
+  let diff-back distance-down        - prev-dist-back
+  let diff-up   distance-up          - prev-dist-up
+  let diff-down distance-down        - prev-dist-down
+  
+  set alignment-forward project-forward 0 0 1.0 diff-f
+  
+;  set alignment-forward project-forward  60 0 1.0 diff-fr
+;                      + project-forward -60 0 1.0 diff-fl
+;  if boids-observe-backwards
+;  [ set alignment-forward alignment-forward + project-forward 180 0 1.0 diff-back ]
+;  
+;  set alignment-sideways project-sideways  60 0 1.0 diff-fr
+;                       + project-sideways -60 0 1.0 diff-fl
+;
+;  set alignment-up project-up 0  90 1.0 diff-up 
+;                 + project-up 0 -90 1.0 diff-down                                            
+end
+
+
+;;====================================================
+;; basic trigonometry, will calculate the magnitude of the desired velocity (the speed) in the horrizontal plane
+;;====================================================
+to-report calculate-desired-speed [ collective-forward collective-sideways ]
+  report sqrt ((collective-forward ^ 2) + (collective-sideways ^ 2))
+end
+
+;;====================================================
+;; basic trigonometry, will calculate the heading of the desired heading of the AUV, relative to the direction in which the AUV faces
+;;====================================================
+to-report calculate-desired-heading [ collective-forward collective-sideways ]
+  if collective-forward = 0 and collective-sideways = 0
+  [ report 0 ] ;; default to straight ahead
+  report atan collective-sideways collective-forward
+end
+
+;;====================================================
+;; projects vector of given magnitude, heading and pitch onto the vector along which an AUV points. 
+;; The projection can be scaled by the given scalar. 
+;;   sensor-heading - heading of vector relative to AUV
+;;   sensor-pitch   - pitch of vector relative to AUV
+;;   scale-factor   - the projection is multiplied by this factor
+;;   sensor-reading - the magnitude of the vector
+;;
+;; Note that a heading of 0 points in the same direction of the AUV, and a pitch of 90 points stright upwards. 
+;;====================================================
+to-report project-forward [ sensor-heading sensor-pitch scale-factor sensor-reading ]
+  report (cos sensor-pitch) * (cos sensor-heading) * sensor-reading * scale-factor
+end
+
+;;====================================================
+;; projects vector of given magnitude, heading and pitch onto the vector sideways to where the AUV points (left to right). 
+;; The projection can be scaled by the given scalar. 
+;;   sensor-heading - heading of vector relative to AUV
+;;   sensor-pitch   - pitch of vector relative to AUV
+;;   scale-factor   - the projection is multiplied by this factor
+;;   sensor-reading - the magnitude of the vector
+;;
+;; Note that a heading of 0 points in the same direction of the AUV, and a pitch of 90 points stright upwards. 
+;;====================================================
+to-report project-sideways [ sensor-heading sensor-pitch scale-factor sensor-reading ]
+  report (cos sensor-pitch) * (sin sensor-heading) * sensor-reading * scale-factor
+end
+
+
+;;====================================================
+;; projects vector of given magnitude, heading and pitch onto the vector upwards with respect to where the AUV points. 
+;; The projection can be scaled by the given scalar. 
+;;   sensor-heading - heading of vector relative to AUV
+;;   sensor-pitch   - pitch of vector relative to AUV
+;;   scale-factor   - the projection is multiplied by this factor
+;;   sensor-reading - the magnitude of the vector
+;;
+;; Note that a heading of 0 points in the same direction of the AUV, and a pitch of 90 points stright upwards. 
+;;====================================================
+to-report project-up [ sensor-heading sensor-pitch scale-factor sensor-reading ]
+  report (sin sensor-pitch) * sensor-reading * scale-factor
+end
+
+
+
+;;====================================================
+;; Called by every AUV to set up. 
+;;====================================================
+to Controller-setup
+  controller-setup-parameters
+   
+  set cohesion-sideways 0 ;; positive numbers are right, negative are left
+  set cohesion-forward 0  ;; positive numbers are forward, negative are back
+  set cohesion-up 0       ;; positive numbers are up, negative are down. 
+   
+  set separation-sideways 0
+  set separation-forward 0
+  set separation-up 0 
+   
+  set alignment-sideways 0
+  set alignment-forward 0
+  set alignment-up 0
+    
+  set prev-dist-front-right  OS_sens_BL_front_right
+  set prev-dist-front-left   OS_sens_BL_front_left
+  set prev-dist-front        OS_sens_BL_front
+  set prev-dist-back         OS_sens_BL_back
+  set prev-dist-up           OS_sens_BL_up
+  set prev-dist-down         OS_sens_BL_down
+  
+  set swarm-in-range true
+  set swarm-in-range-data-collection true
+end

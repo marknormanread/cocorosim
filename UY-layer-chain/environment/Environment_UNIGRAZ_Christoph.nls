@@ -1,0 +1,7 @@
+
+
+to setup-environment
+  show "setting Shoaling environment."
+  resize-world -80 80 -80 80 -2 20
+  
+end

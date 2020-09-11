@@ -1,0 +1,54 @@
+globals 
+[
+  list-item-number
+  volt-to-integer-factor
+]
+
+to HAL-setup ; HAL is very basic as of now; it only converts volt values ranging from 0V to 5V (from the sensors) to integer values ranging from 0 to 255
+  
+  set volt-to-integer-factor 51; 0 to 5 Volts -> 0 to 255 integer; -2.5 to 2.5 Volts -> -127 to 128 integer
+  
+  
+end
+
+
+to HAL-update-sensors
+  
+  set list-item-number 0
+  
+  foreach list-of-sensor-volt-values
+  [
+    set list-of-sensor-integer-values (replace-item list-item-number list-of-sensor-integer-values (HAL-convert-volt-to-integer (item list-item-number list-of-sensor-volt-values))) 
+    set list-item-number (list-item-number + 1)
+  ]
+end
+
+
+to HAL-update-actuators
+  set list-item-number 0
+  
+  foreach list-of-actuator-integer-values
+  [
+    set list-of-actuator-volt-values (replace-item list-item-number list-of-actuator-volt-values (HAL-convert-integer-to-volt (item list-item-number list-of-actuator-integer-values))) 
+    set list-item-number (list-item-number + 1)
+  ]
+end
+
+
+to-report HAL-convert-volt-to-integer [input-volt]
+  let value 0;
+  set value (round (input-volt * volt-to-integer-factor)) ; round works this way: (round -127.5) -> -127; (round 127.5) -> 128 
+  
+  report value ; reports values between 0 and 255 (for sensors) and values between -127 and +128 (for actuators)
+
+end
+
+
+to-report HAL-convert-integer-to-volt [input-integer]
+
+let value 0;
+set value (input-integer / volt-to-integer-factor)
+
+report value ; reports values between 0 and 5 (for sensors) and values between -2.5 and +2.5 (for actuators)
+
+end

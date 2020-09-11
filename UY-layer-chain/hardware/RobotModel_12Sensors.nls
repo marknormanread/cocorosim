@@ -1,0 +1,84 @@
+;;==============================================================================================
+;;==============================================================================================
+;; Author : MR
+;;
+;; This file contains procedures for creating a completely theoretical AUV based on 12 passive distance
+;; sensors located around the robot. The purpose is for comparison with other AUV designs that have
+;; fewer sensors: it is being used for experimentation to ascertain the advantage (if any) that more
+;; sensors provide for controller behaviours. This robot configuration is not based on any of the 
+;; hardware platforms being created in CoCoRo. 
+;;
+;; The sensors are configured as follows:
+;;   1 sensor pointing directly forward.
+;;   4 sensors pointing forward and 45 degrees out: up-left, up-right, down-left and down-right. 
+;;   6 sensors pointing slightly backward, in a ring around the robot. They see directly up and down
+;;       but slightly back, with two more on each the left and right side pointing slightly back and slightly
+;;       up and down. 
+;;   1 sensor pointing directly backwards. 
+;;
+;; Hence, the robot can see in front of itself, and round the sides (and top/bottom) quite well, but has
+;; limited vision to the back. 
+;;
+;;==============================================================================================
+;;==============================================================================================
+
+
+
+
+;;==============================================================================================
+;; Author: MR
+;;
+;; Creates a robot with 12 passive sensors situated around the hull. 
+;;==============================================================================================
+to robotmodel-create-AUV12 [this-patch] ;; this-patch is where the AUV is to be located in the simulation
+  let new-robot core-create-default-AUV-DUMMY this-patch;
+  ask new-robot [robotmodel-add-sensors-AUV12]
+  ask new-robot [robotmodel-add-actuators-AUV-DUMMY]
+end
+
+
+
+
+;;==============================================================================================
+;; Author: MR
+;;
+;; Procedure to create a different AUV which has 12 blue-light sensors. 
+;;==============================================================================================
+to robotmodel-add-sensors-AUV12
+    ;DO NOT CHANGE: Format of sensors: [ TYPE DESCRIPTION TYPE-HUMANREADABLE PARAMETER_1 PARAMETER_2 ...] 
+  
+         ;; sensor for seeing other AUVs; Parameters: sensor-heading; sensor-pitch; sensor-range; sensor-aperture 
+         ;; there is a code to the 'fld' text at the end of sensor names: 
+         ;; f=front, b=back, l=left, r=right, u=up, d=down. 
+  core-add-sensor-description [ 1 "passive-distance-sensor-f"   "passive-distance-MK1"    0    0  15 90] ;; item 0
+  core-add-sensor-description [ 1 "passive-distance-sensor-fru" "passive-distance-MK1"   45   45  15 90] ;; item 1
+  core-add-sensor-description [ 1 "passive-distance-sensor-frd" "passive-distance-MK1"   45  -45  15 90] ;; item 2
+  core-add-sensor-description [ 1 "passive-distance-sensor-fld" "passive-distance-MK1"  -45  -45  15 90] ;; item 3
+  core-add-sensor-description [ 1 "passive-distance-sensor-flu" "passive-distance-MK1"  -45   45  15 90] ;; item 4
+  core-add-sensor-description [ 1 "passive-distance-sensor-bu"  "passive-distance-MK1"  180   70  15 90] ;; item 5 ; directly up and slightly backwards
+  core-add-sensor-description [ 1 "passive-distance-sensor-bru" "passive-distance-MK1"  110   30  15 90] ;; item 6
+  core-add-sensor-description [ 1 "passive-distance-sensor-brd" "passive-distance-MK1"  110  -30  15 90] ;; item 7
+  core-add-sensor-description [ 1 "passive-distance-sensor-bd"  "passive-distance-MK1" -180  -70  15 90] ;; item 8 ; directly down and slightly backwards
+  core-add-sensor-description [ 1 "passive-distance-sensor-bld" "passive-distance-MK1" -110  -30  15 90] ;; item 9
+  core-add-sensor-description [ 1 "passive-distance-sensor-blu" "passive-distance-MK1" -110   30  15 90] ;; item 10 
+  core-add-sensor-description [ 1 "passive-distance-sensor-b"   "passive-distance-MK1"  180    0  15 90] ;; item 11
+
+  
+         ;; sensor only (!) for seeing borders; Parameters: sensor-heading; sensor-range;
+  core-add-sensor-description [ 2 "active-border-distance-sensor-front" "active-distance-MK1"   0 8] ;; item 12
+  core-add-sensor-description [ 2 "active-border-distance-sensor-right" "active-distance-MK1"  90 8] ;; item 13
+  core-add-sensor-description [ 2 "active-border-distance-sensor-back"  "active-distance-MK1" 180 8] ;; item 14
+  core-add-sensor-description [ 2 "active-border-distance-sensor-left"  "active-distance-MK1" -90 8] ;; item 15
+  
+  core-add-sensor-description [ 3 "ground-distance-sensor" "ground-distance-MK1" 5] ;; item 16 ; sensor for seeing the ground; Parameters: sensor-range;
+   
+  core-add-sensor-description [ 4 "depth-pressure-sensor" "Pressure-MK1" 1] ;; item 17 ; Parameters: pressure to z-coordinate ratio
+  
+  core-add-sensor-description [ 5 "AUV-neighbors-sensor" "Acoustic-MK1" 15] ;; item 18 ; Parameters: range
+  
+  core-add-sensor-description [ 6 "distance-to-basestation-sensor" "Acoustic-MK2" 30] ;; item 19; Parameters: range
+  
+  core-add-sensor-description [ 7 "compass" "compass" ] ;; item 20
+  
+  core-add-sensor-description [ 8 "electric-field-sensor" "Electric-MK1" 1] ; Parameters: range  
+end

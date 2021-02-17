@@ -1,6 +1,6 @@
 # cocorosim
 
-Underwater swarm robotics simulation, developed as part of the CoCoRo project. 
+Underwater swarm robotics simulation, which I led the development of when I was part of the EU-funded CoCoRo project. 
 
 This code was originally hosted on a University of Graz (the coordinating partners of the CoCoRo project, under which this simulation was built) website. 
 That website has since gone down, for reasons unknown to me. 
@@ -10,7 +10,6 @@ Contained herein are several versions of the simulation that have been used for 
 I've included the original code base also. 
 
 Please see the 'CoCoRoSim_documentation.doc' file for documentation on how to use CoCoRoSim. 
-You are welcome to ask questions of me about this, but please understand it has been 8 years (at time of writing) since I was involved in this project - my ability to provide support is very limited. 
 
 ## References
 
